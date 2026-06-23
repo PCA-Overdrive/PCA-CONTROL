@@ -15,6 +15,8 @@ TO-DO
 - Driving service
 - `0x401` 출차 완료 송신 로직
 - `0x100` 차량 제어 송신 로직
+<img width="1536" height="1024" alt="ChatGPT Image 2026년 6월 24일 오전 04_55_08" src="https://github.com/user-attachments/assets/c5dd8e53-f8b3-4840-967b-d7f1861aade3" />
+
 
 ## Folder Structure
 
