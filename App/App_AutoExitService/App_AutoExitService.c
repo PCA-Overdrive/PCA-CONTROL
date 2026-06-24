@@ -26,6 +26,17 @@ static AppAutoExitState g_autoExitState = APP_AUTO_EXIT_STATE_IDLE;
 static uint8 g_exitStatus = APP_AUTO_EXIT_STATUS_IDLE;
 static TickType_t g_exitResultStartTick = 0u;
 
+static sint16 g_exitStartYawDeg = 0;
+static sint16 g_exitEndYawDeg = 0;
+static sint16 g_exitYawDiffDeg = 0;
+static boolean g_exitYawValid = FALSE;
+
+/* 디버거 확인용 */
+volatile sint16 g_dbg_autoExitStartYawDeg = 0;
+volatile sint16 g_dbg_autoExitEndYawDeg = 0;
+volatile sint16 g_dbg_autoExitYawDiffDeg = 0;
+volatile uint8  g_dbg_autoExitYawValid = 0u;
+
 static const AppAutoExitMotionStep *g_activeProfile = 0;
 static uint32 g_activeProfileCount = 0u;
 static uint32 g_activeStepIndex = 0u;
@@ -76,6 +87,133 @@ static uint32 AppAutoExitService_GetElapsedMs(TickType_t startTick)
     elapsedTick = xTaskGetTickCount() - startTick;
 
     return (uint32)((elapsedTick * 1000u) / configTICK_RATE_HZ);
+}
+
+static sint16 AppAutoExitService_CalcYawDiffDeg(sint16 currentYawDeg,
+                                                sint16 startYawDeg)
+{
+    sint16 diffDeg;
+
+    diffDeg = currentYawDeg - startYawDeg;
+
+    if(diffDeg > 180)
+    {
+        diffDeg -= 360;
+    }
+    else if(diffDeg < -180)
+    {
+        diffDeg += 360;
+    }
+
+    return diffDeg;
+}
+
+#if (APP_AUTO_EXIT_YAW_VALIDATION_ENABLE != 0u)
+static sint16 AppAutoExitService_AbsSint16(sint16 value)
+{
+    return (value < 0) ? (sint16)(-value) : value;
+}
+#endif
+
+static boolean AppAutoExitService_IsYawCompletionValid(void)
+{
+#if (APP_AUTO_EXIT_YAW_VALIDATION_ENABLE == 0u)
+    return TRUE;
+#else
+    sint16 absYawDiffDeg;
+
+    if(g_exitYawValid == FALSE)
+    {
+        return FALSE;
+    }
+
+    absYawDiffDeg = AppAutoExitService_AbsSint16(g_exitYawDiffDeg);
+
+    if(g_exitDirection == APP_AUTO_EXIT_DIR_STRAIGHT)
+    {
+        return (absYawDiffDeg <= APP_AUTO_EXIT_STRAIGHT_YAW_MAX_DEG) ? TRUE : FALSE;
+    }
+
+    if((absYawDiffDeg >= APP_AUTO_EXIT_TURN_YAW_MIN_DEG) &&
+       (absYawDiffDeg <= APP_AUTO_EXIT_TURN_YAW_MAX_DEG))
+    {
+        return TRUE;
+    }
+
+    return FALSE;
+#endif
+}
+
+static void AppAutoExitService_CaptureStartYaw(void)
+{
+    AppUltrasonicState ultrasonic;
+
+    if(AppRxService_GetUltrasonicState(&ultrasonic) == pdPASS)
+    {
+        g_exitStartYawDeg = ultrasonic.imuYaw;
+        g_exitEndYawDeg = ultrasonic.imuYaw;
+        g_exitYawDiffDeg = 0;
+        g_exitYawValid = TRUE;
+
+        g_dbg_autoExitStartYawDeg = g_exitStartYawDeg;
+        g_dbg_autoExitEndYawDeg = g_exitEndYawDeg;
+        g_dbg_autoExitYawDiffDeg = g_exitYawDiffDeg;
+        g_dbg_autoExitYawValid = 1u;
+    }
+    else
+    {
+        g_exitYawValid = FALSE;
+        g_dbg_autoExitYawValid = 0u;
+    }
+}
+
+static void AppAutoExitService_CaptureEndYaw(void)
+{
+    AppUltrasonicState ultrasonic;
+
+    if((g_exitYawValid == TRUE) &&
+       (AppRxService_GetUltrasonicState(&ultrasonic) == pdPASS))
+    {
+        g_exitEndYawDeg = ultrasonic.imuYaw;
+        g_exitYawDiffDeg =
+            AppAutoExitService_CalcYawDiffDeg(g_exitEndYawDeg,
+                                              g_exitStartYawDeg);
+
+        g_dbg_autoExitEndYawDeg = g_exitEndYawDeg;
+        g_dbg_autoExitYawDiffDeg = g_exitYawDiffDeg;
+        g_dbg_autoExitYawValid = 1u;
+    }
+    else
+    {
+        g_exitYawValid = FALSE;
+        g_dbg_autoExitYawValid = 0u;
+    }
+}
+
+static void AppAutoExitService_UpdateCurrentYaw(void)
+{
+    AppUltrasonicState ultrasonic;
+
+    if(g_exitYawValid == FALSE)
+    {
+        return;
+    }
+
+    if(AppRxService_GetUltrasonicState(&ultrasonic) == pdPASS)
+    {
+        g_exitEndYawDeg = ultrasonic.imuYaw;
+        g_exitYawDiffDeg =
+            AppAutoExitService_CalcYawDiffDeg(g_exitEndYawDeg,
+                                              g_exitStartYawDeg);
+
+        g_dbg_autoExitEndYawDeg = g_exitEndYawDeg;
+        g_dbg_autoExitYawDiffDeg = g_exitYawDiffDeg;
+        g_dbg_autoExitYawValid = 1u;
+    }
+    else
+    {
+        g_dbg_autoExitYawValid = 0u;
+    }
 }
 
 static void AppAutoExitService_SetExitResultStatus(uint8 exitStatus)
@@ -238,7 +376,17 @@ static void AppAutoExitService_ServiceProfile(void)
 
     if(g_activeStepIndex >= g_activeProfileCount)
     {
-        AppAutoExitService_SetExitResultStatus(APP_AUTO_EXIT_STATUS_COMPLETE);
+        AppAutoExitService_CaptureEndYaw();
+
+        if(AppAutoExitService_IsYawCompletionValid() == TRUE)
+        {
+            AppAutoExitService_SetExitResultStatus(APP_AUTO_EXIT_STATUS_COMPLETE);
+        }
+        else
+        {
+            AppAutoExitService_SetExitResultStatus(APP_AUTO_EXIT_STATUS_BLOCKED);
+        }
+
         AppAutoExitService_StopProfile();
         return;
     }
@@ -309,6 +457,8 @@ static void AppAutoExitService_StartAutoExit(AppAutoExitDirection direction)
     }
 
     g_exitStatus = APP_AUTO_EXIT_STATUS_IN_PROGRESS;
+
+    AppAutoExitService_CaptureStartYaw();
 
     g_exitDirection = direction;
 
@@ -461,7 +611,14 @@ static void AppAutoExitService_HandleCommand(AppAutoExitCmd command)
             break;
 
         case APP_AUTO_EXIT_CMD_STOP:
-            AppAutoExitService_EnterStopped();
+            if(g_autoExitState != APP_AUTO_EXIT_STATE_IDLE)
+            {
+                AppAutoExitService_EnterStopped();
+            }
+            else
+            {
+                g_exitStatus = APP_AUTO_EXIT_STATUS_IDLE;
+            }
             break;
 
         case APP_AUTO_EXIT_CMD_NORMAL:
@@ -532,6 +689,11 @@ void AppAutoExitService_Task(void *arg)
         }
 
         AppAutoExitService_ServiceState();
+
+        if(g_exitStatus == APP_AUTO_EXIT_STATUS_IN_PROGRESS)
+        {
+            AppAutoExitService_UpdateCurrentYaw();
+        }
 
         AppAutoExitService_ServiceExitStatusClear();
 
