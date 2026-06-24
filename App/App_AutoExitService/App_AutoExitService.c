@@ -23,6 +23,8 @@ static boolean g_autoExitCmdValid = FALSE;
 static VehicleControlCmd_t g_autoExitCmd;
 
 static AppAutoExitState g_autoExitState = APP_AUTO_EXIT_STATE_IDLE;
+static uint8 g_exitStatus = APP_AUTO_EXIT_STATUS_IDLE;
+static TickType_t g_exitResultStartTick = 0u;
 
 static const AppAutoExitMotionStep *g_activeProfile = 0;
 static uint32 g_activeProfileCount = 0u;
@@ -76,6 +78,26 @@ static uint32 AppAutoExitService_GetElapsedMs(TickType_t startTick)
     return (uint32)((elapsedTick * 1000u) / configTICK_RATE_HZ);
 }
 
+static void AppAutoExitService_SetExitResultStatus(uint8 exitStatus)
+{
+    g_exitStatus = exitStatus;
+    g_exitResultStartTick = xTaskGetTickCount();
+}
+
+static void AppAutoExitService_ServiceExitStatusClear(void)
+{
+    if((g_exitStatus == APP_AUTO_EXIT_STATUS_COMPLETE) ||
+       (g_exitStatus == APP_AUTO_EXIT_STATUS_BLOCKED) ||
+       (g_exitStatus == APP_AUTO_EXIT_STATUS_STOPPED))
+    {
+        if(AppAutoExitService_HasElapsed(g_exitResultStartTick,
+                                         APP_AUTO_EXIT_RESULT_HOLD_MS) == TRUE)
+        {
+            g_exitStatus = APP_AUTO_EXIT_STATUS_IDLE;
+        }
+    }
+}
+
 static void AppAutoExitService_SetCommand(uint8 driveCmd, uint8 steeringCmd)
 {
     g_autoExitCmd.driveCmd = driveCmd;
@@ -83,11 +105,11 @@ static void AppAutoExitService_SetCommand(uint8 driveCmd, uint8 steeringCmd)
     g_autoExitCmdValid = TRUE;
 }
 
-static void AppAutoExitService_SendExitComplete(uint8 exitComplete)
+static void AppAutoExitService_SendExitStatus(uint8 exitStatus)
 {
     ExitCompleteCmd_t tx;
 
-    tx.exitComplete = exitComplete;
+    tx.exitStatus = exitStatus;
 
     (void)AppCan_SendExitComplete(&tx);
 }
@@ -115,11 +137,13 @@ static void AppAutoExitService_EnterTimedStopState(AppAutoExitState state)
 
 static void AppAutoExitService_EnterBlocked(void)
 {
+    AppAutoExitService_SetExitResultStatus(APP_AUTO_EXIT_STATUS_BLOCKED);
     AppAutoExitService_EnterTimedStopState(APP_AUTO_EXIT_STATE_BLOCKED);
 }
 
 static void AppAutoExitService_EnterStopped(void)
 {
+    AppAutoExitService_SetExitResultStatus(APP_AUTO_EXIT_STATUS_STOPPED);
     AppAutoExitService_EnterTimedStopState(APP_AUTO_EXIT_STATE_STOPPED);
 }
 
@@ -214,7 +238,7 @@ static void AppAutoExitService_ServiceProfile(void)
 
     if(g_activeStepIndex >= g_activeProfileCount)
     {
-        AppAutoExitService_SendExitComplete(0x01u);
+        AppAutoExitService_SetExitResultStatus(APP_AUTO_EXIT_STATUS_COMPLETE);
         AppAutoExitService_StopProfile();
         return;
     }
@@ -284,7 +308,7 @@ static void AppAutoExitService_StartAutoExit(AppAutoExitDirection direction)
         return;
     }
 
-    AppAutoExitService_SendExitComplete(0x00u);
+    g_exitStatus = APP_AUTO_EXIT_STATUS_IN_PROGRESS;
 
     g_exitDirection = direction;
 
@@ -441,6 +465,11 @@ static void AppAutoExitService_HandleCommand(AppAutoExitCmd command)
             break;
 
         case APP_AUTO_EXIT_CMD_NORMAL:
+            if(g_autoExitState == APP_AUTO_EXIT_STATE_IDLE)
+            {
+                g_exitStatus = APP_AUTO_EXIT_STATUS_IDLE;
+            }
+            break;
         default:
             break;
     }
@@ -448,6 +477,9 @@ static void AppAutoExitService_HandleCommand(AppAutoExitCmd command)
 
 void AppAutoExitService_Init(void)
 {
+    g_exitStatus = APP_AUTO_EXIT_STATUS_IDLE;
+    g_exitResultStartTick = 0u;
+
     AppAutoExitService_EnterIdle();
 
     g_autoExitCmd.driveCmd = APP_AUTO_EXIT_DRIVE_STOP;
@@ -478,12 +510,15 @@ BaseType_t AppAutoExitService_GetControlCommand(VehicleControlCmd_t *cmd)
 void AppAutoExitService_Task(void *arg)
 {
     TickType_t lastWakeTime;
+    TickType_t lastStatusTxTick;
+    TickType_t nowTick;
     AppAutoParkingState autoParking;
     static AppAutoExitCmd prevCmd = APP_AUTO_EXIT_CMD_NORMAL;
 
     (void)arg;
 
     lastWakeTime = xTaskGetTickCount();
+    lastStatusTxTick = lastWakeTime;
 
     for(;;)
     {
@@ -497,6 +532,16 @@ void AppAutoExitService_Task(void *arg)
         }
 
         AppAutoExitService_ServiceState();
+
+        AppAutoExitService_ServiceExitStatusClear();
+
+        nowTick = xTaskGetTickCount();
+
+        if((nowTick - lastStatusTxTick) >= pdMS_TO_TICKS(APP_AUTO_EXIT_STATUS_TX_PERIOD_MS))
+        {
+            AppAutoExitService_SendExitStatus(g_exitStatus);
+            lastStatusTxTick = nowTick;
+        }
 
         vTaskDelayUntil(&lastWakeTime,
                         pdMS_TO_TICKS(APP_AUTO_EXIT_SERVICE_PERIOD_MS));

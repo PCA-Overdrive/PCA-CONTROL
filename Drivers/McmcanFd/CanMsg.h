@@ -59,8 +59,16 @@ typedef struct {
  * 0x401 | ExitCompleteCmd
  * 판단 ECU → 라즈베리파이 | Classical CAN | 1 byte
  * ================================================================ */
-typedef struct {
-    uint8 exitComplete;      /* 0x00: 출차 완료 X, 0x01: 출차 완료 */
+typedef struct
+{
+    uint8 exitStatus;
+    /*
+     * 0x00: IDLE
+     * 0x01: IN_PROGRESS
+     * 0x02: COMPLETE
+     * 0x03: BLOCKED
+     * 0x04: STOPPED
+     */
 } ExitCompleteCmd_t;
 
 /* ================================================================
