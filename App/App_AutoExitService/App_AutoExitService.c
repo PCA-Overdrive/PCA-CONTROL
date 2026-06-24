@@ -5,9 +5,97 @@
 
 #define APP_AUTO_EXIT_SERVICE_PERIOD_MS 10u
 
+#define APP_AUTO_EXIT_DRIVE_STOP       127u
+#define APP_AUTO_EXIT_STEER_CENTER     127u
+
+#define APP_AUTO_EXIT_DRIVE_FORWARD    80u
+#define APP_AUTO_EXIT_DRIVE_REVERSE    200u
+
+#define APP_AUTO_EXIT_STEER_LEFT       0u
+#define APP_AUTO_EXIT_STEER_RIGHT      255u
+
+#define APP_AUTO_EXIT_SHIFT_STOP_MS    300u
+#define APP_AUTO_EXIT_FORWARD_1_MS     3000u
+#define APP_AUTO_EXIT_TURN_1_MS        2500u
+#define APP_AUTO_EXIT_REVERSE_1_MS     1800u
+#define APP_AUTO_EXIT_TURN_2_MS        2700u
+#define APP_AUTO_EXIT_REVERSE_TURN_MS  2400u
+#define APP_AUTO_EXIT_TURN_3_MS        3000u
+#define APP_AUTO_EXIT_FORWARD_2_MS     500u
+#define APP_AUTO_EXIT_FINAL_STOP_MS    700u
+
+typedef enum
+{
+    APP_AUTO_EXIT_STATE_IDLE = 0,
+    APP_AUTO_EXIT_STATE_RUN_PROFILE,
+    APP_AUTO_EXIT_STATE_DONE,
+    APP_AUTO_EXIT_STATE_STOPPED
+} AppAutoExitState;
+
+typedef struct
+{
+    uint8 driveCmd;
+    uint8 steeringCmd;
+    uint32 durationMs;
+} AppAutoExitMotionStep;
+
+static const AppAutoExitMotionStep g_profileStraight[] =
+{
+    { APP_AUTO_EXIT_DRIVE_FORWARD, APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_FORWARD_1_MS },
+    { APP_AUTO_EXIT_DRIVE_STOP,    APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_FINAL_STOP_MS }
+};
+
+static const AppAutoExitMotionStep g_profileRight[] =
+{
+    { APP_AUTO_EXIT_DRIVE_FORWARD, APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_FORWARD_1_MS },
+    { APP_AUTO_EXIT_DRIVE_FORWARD, APP_AUTO_EXIT_STEER_RIGHT,  APP_AUTO_EXIT_TURN_1_MS },
+    { APP_AUTO_EXIT_DRIVE_STOP,    APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_SHIFT_STOP_MS },
+    { APP_AUTO_EXIT_DRIVE_REVERSE, APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_REVERSE_1_MS },
+    { APP_AUTO_EXIT_DRIVE_STOP,    APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_SHIFT_STOP_MS },
+    { APP_AUTO_EXIT_DRIVE_FORWARD, APP_AUTO_EXIT_STEER_RIGHT,  APP_AUTO_EXIT_TURN_2_MS },
+    { APP_AUTO_EXIT_DRIVE_STOP,    APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_SHIFT_STOP_MS },
+    { APP_AUTO_EXIT_DRIVE_REVERSE, APP_AUTO_EXIT_STEER_LEFT,   APP_AUTO_EXIT_REVERSE_TURN_MS },
+    { APP_AUTO_EXIT_DRIVE_STOP,    APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_SHIFT_STOP_MS },
+    { APP_AUTO_EXIT_DRIVE_FORWARD, APP_AUTO_EXIT_STEER_RIGHT,  APP_AUTO_EXIT_TURN_3_MS },
+    { APP_AUTO_EXIT_DRIVE_FORWARD, APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_FORWARD_2_MS },
+    { APP_AUTO_EXIT_DRIVE_STOP,    APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_FINAL_STOP_MS }
+};
+
+static const AppAutoExitMotionStep g_profileLeft[] =
+{
+    { APP_AUTO_EXIT_DRIVE_FORWARD, APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_FORWARD_1_MS },
+    { APP_AUTO_EXIT_DRIVE_FORWARD, APP_AUTO_EXIT_STEER_LEFT,   APP_AUTO_EXIT_TURN_1_MS },
+    { APP_AUTO_EXIT_DRIVE_STOP,    APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_SHIFT_STOP_MS },
+    { APP_AUTO_EXIT_DRIVE_REVERSE, APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_REVERSE_1_MS },
+    { APP_AUTO_EXIT_DRIVE_STOP,    APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_SHIFT_STOP_MS },
+    { APP_AUTO_EXIT_DRIVE_FORWARD, APP_AUTO_EXIT_STEER_LEFT,   APP_AUTO_EXIT_TURN_2_MS },
+    { APP_AUTO_EXIT_DRIVE_STOP,    APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_SHIFT_STOP_MS },
+    { APP_AUTO_EXIT_DRIVE_REVERSE, APP_AUTO_EXIT_STEER_RIGHT,  APP_AUTO_EXIT_REVERSE_TURN_MS },
+    { APP_AUTO_EXIT_DRIVE_STOP,    APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_SHIFT_STOP_MS },
+    { APP_AUTO_EXIT_DRIVE_FORWARD, APP_AUTO_EXIT_STEER_LEFT,   APP_AUTO_EXIT_TURN_3_MS },
+    { APP_AUTO_EXIT_DRIVE_FORWARD, APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_FORWARD_2_MS },
+    { APP_AUTO_EXIT_DRIVE_STOP,    APP_AUTO_EXIT_STEER_CENTER, APP_AUTO_EXIT_FINAL_STOP_MS }
+};
+
+#define APP_AUTO_EXIT_PROFILE_STRAIGHT_COUNT \
+    (sizeof(g_profileStraight) / sizeof(g_profileStraight[0]))
+
+#define APP_AUTO_EXIT_PROFILE_RIGHT_COUNT \
+    (sizeof(g_profileRight) / sizeof(g_profileRight[0]))
+
+#define APP_AUTO_EXIT_PROFILE_LEFT_COUNT \
+    (sizeof(g_profileLeft) / sizeof(g_profileLeft[0]))
+
 static boolean g_autoExitActive = FALSE;
 static boolean g_autoExitCmdValid = FALSE;
 static VehicleControlCmd_t g_autoExitCmd;
+
+static AppAutoExitState g_autoExitState = APP_AUTO_EXIT_STATE_IDLE;
+
+static const AppAutoExitMotionStep *g_activeProfile = 0;
+static uint32 g_activeProfileCount = 0u;
+static uint32 g_activeStepIndex = 0u;
+static TickType_t g_stepStartTick = 0u;
 
 void AppAutoExitService_Init(void)
 {
@@ -21,6 +109,99 @@ void AppAutoExitService_Init(void)
 boolean AppAutoExitService_IsActive(void)
 {
     return g_autoExitActive;
+}
+
+static boolean AppAutoExitService_HasElapsed(TickType_t startTick, uint32 durationMs)
+{
+    TickType_t nowTick;
+
+    nowTick = xTaskGetTickCount();
+
+    if((nowTick - startTick) >= pdMS_TO_TICKS(durationMs))
+    {
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static void AppAutoExitService_SetStopCommand(void)
+{
+    g_autoExitCmd.driveCmd = APP_AUTO_EXIT_DRIVE_STOP;
+    g_autoExitCmd.steeringCmd = APP_AUTO_EXIT_STEER_CENTER;
+    g_autoExitCmdValid = TRUE;
+}
+
+static void AppAutoExitService_StartProfile(const AppAutoExitMotionStep *profile,
+                                            uint32 profileCount)
+{
+    if((profile == 0) || (profileCount == 0u))
+    {
+        g_autoExitActive = FALSE;
+        g_autoExitCmdValid = FALSE;
+        g_autoExitState = APP_AUTO_EXIT_STATE_IDLE;
+        AppAutoExitService_SetStopCommand();
+        return;
+    }
+
+    g_activeProfile = profile;
+    g_activeProfileCount = profileCount;
+    g_activeStepIndex = 0u;
+    g_stepStartTick = xTaskGetTickCount();
+
+    g_autoExitActive = TRUE;
+    g_autoExitCmdValid = TRUE;
+    g_autoExitState = APP_AUTO_EXIT_STATE_RUN_PROFILE;
+
+    g_autoExitCmd.driveCmd = g_activeProfile[0].driveCmd;
+    g_autoExitCmd.steeringCmd = g_activeProfile[0].steeringCmd;
+}
+
+static void AppAutoExitService_StopProfile(void)
+{
+    g_activeProfile = 0;
+    g_activeProfileCount = 0u;
+    g_activeStepIndex = 0u;
+
+    g_autoExitActive = FALSE;
+    g_autoExitCmdValid = FALSE;
+    g_autoExitState = APP_AUTO_EXIT_STATE_IDLE;
+
+    AppAutoExitService_SetStopCommand();
+}
+
+static void AppAutoExitService_ServiceProfile(void)
+{
+    if(g_autoExitState != APP_AUTO_EXIT_STATE_RUN_PROFILE)
+    {
+        return;
+    }
+
+    if((g_activeProfile == 0) || (g_activeStepIndex >= g_activeProfileCount))
+    {
+        AppAutoExitService_StopProfile();
+        return;
+    }
+
+    if(AppAutoExitService_HasElapsed(g_stepStartTick,
+                                     g_activeProfile[g_activeStepIndex].durationMs) == FALSE)
+    {
+        return;
+    }
+
+    g_activeStepIndex++;
+
+    if(g_activeStepIndex >= g_activeProfileCount)
+    {
+        AppAutoExitService_StopProfile();
+        return;
+    }
+
+    g_stepStartTick = xTaskGetTickCount();
+
+    g_autoExitCmd.driveCmd = g_activeProfile[g_activeStepIndex].driveCmd;
+    g_autoExitCmd.steeringCmd = g_activeProfile[g_activeStepIndex].steeringCmd;
+    g_autoExitCmdValid = TRUE;
 }
 
 BaseType_t AppAutoExitService_GetControlCommand(VehicleControlCmd_t *cmd)
@@ -38,7 +219,6 @@ BaseType_t AppAutoExitService_GetControlCommand(VehicleControlCmd_t *cmd)
     *cmd = g_autoExitCmd;
     return pdPASS;
 }
-
 void AppAutoExitService_Task(void *arg)
 {
     TickType_t lastWakeTime;
@@ -58,61 +238,34 @@ void AppAutoExitService_Task(void *arg)
                 switch(autoParking.cmd)
                 {
                     case APP_AUTO_EXIT_CMD_START_STRAIGHT:
-                        /*
-                         * 아직 진짜 출차 로직 넣기 전.
-                         * 1차 테스트: 직진 출차 명령을 받으면 AutoExit active만 켜고 정지 명령 유지.
-                         */
-                        g_autoExitActive = TRUE;
-                        g_autoExitCmdValid = TRUE;
-                        g_autoExitCmd.driveCmd = 127u;
-                        g_autoExitCmd.steeringCmd = 127u;
+                        AppAutoExitService_StartProfile(g_profileStraight,
+                                                         APP_AUTO_EXIT_PROFILE_STRAIGHT_COUNT);
                         break;
 
                     case APP_AUTO_EXIT_CMD_START_LEFT:
-                        /*
-                         * 아직 진짜 출차 로직 넣기 전.
-                         * 1차 테스트: 왼쪽 출차 명령을 받으면 AutoExit active만 켜고 정지 명령 유지.
-                         */
-                        g_autoExitActive = TRUE;
-                        g_autoExitCmdValid = TRUE;
-                        g_autoExitCmd.driveCmd = 127u;
-                        g_autoExitCmd.steeringCmd = 127u;
+                        AppAutoExitService_StartProfile(g_profileLeft,
+                                                         APP_AUTO_EXIT_PROFILE_LEFT_COUNT);
                         break;
 
                     case APP_AUTO_EXIT_CMD_START_RIGHT:
-                        /*
-                         * 아직 진짜 출차 로직 넣기 전.
-                         * 1차 테스트: 오른쪽 출차 명령을 받으면 AutoExit active만 켜고 정지 명령 유지.
-                         */
-                        g_autoExitActive = TRUE;
-                        g_autoExitCmdValid = TRUE;
-                        g_autoExitCmd.driveCmd = 127u;
-                        g_autoExitCmd.steeringCmd = 127u;
+                        AppAutoExitService_StartProfile(g_profileRight,
+                                                         APP_AUTO_EXIT_PROFILE_RIGHT_COUNT);
                         break;
 
                     case APP_AUTO_EXIT_CMD_STOP:
-                        /*
-                         * 자동출차 중단 명령.
-                         * 현재는 active 해제하고 정지 명령으로 초기화.
-                         */
-                        g_autoExitActive = FALSE;
-                        g_autoExitCmdValid = FALSE;
-                        g_autoExitCmd.driveCmd = 127u;
-                        g_autoExitCmd.steeringCmd = 127u;
+                        AppAutoExitService_StopProfile();
                         break;
 
                     case APP_AUTO_EXIT_CMD_NORMAL:
                     default:
-                        /*
-                         * Normal은 별도 동작 없음.
-                         * 기존 수동/RPi 입력은 DriveService가 처리.
-                         */
                         break;
                 }
 
                 prevCmd = autoParking.cmd;
             }
         }
+
+        AppAutoExitService_ServiceProfile();
 
         vTaskDelayUntil(&lastWakeTime,
                         pdMS_TO_TICKS(APP_AUTO_EXIT_SERVICE_PERIOD_MS));
