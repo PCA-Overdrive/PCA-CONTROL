@@ -3,6 +3,7 @@
 #include "App_PdwService.h"
 #include "App_StatusTxService.h"
 #include "App_DriveService.h"
+#include "App_AutoExitService.h"
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -10,12 +11,13 @@
 #define APP_PDW_STACK_SIZE             (configMINIMAL_STACK_SIZE)
 #define APP_STATUS_TX_STACK_SIZE       (configMINIMAL_STACK_SIZE)
 #define APP_DRIVE_STACK_SIZE           (configMINIMAL_STACK_SIZE)
+#define APP_AUTO_EXIT_STACK_SIZE    (configMINIMAL_STACK_SIZE)
 
 #define APP_CAN_RX_PRIORITY            (tskIDLE_PRIORITY + 4u)
 #define APP_PDW_PRIORITY               (tskIDLE_PRIORITY + 3u)
 #define APP_DRIVE_PRIORITY             (tskIDLE_PRIORITY + 3u)
 #define APP_STATUS_TX_PRIORITY         (tskIDLE_PRIORITY + 2u)
-
+#define APP_AUTO_EXIT_PRIORITY      (tskIDLE_PRIORITY + 3u)
 static void app_panic_loop(void)
 {
     while(1)
@@ -36,7 +38,7 @@ void App_Init(void)
 {
     AppCan_Init();
     AppPdwService_Init();
-
+    AppAutoExitService_Init();
     app_assert_pass(xTaskCreate(AppCan_RxTask,
                                 "CanRx",
                                 APP_CAN_RX_STACK_SIZE,
@@ -63,5 +65,11 @@ void App_Init(void)
                                 APP_STATUS_TX_STACK_SIZE,
                                 NULL,
                                 APP_STATUS_TX_PRIORITY,
+                                NULL));
+    app_assert_pass(xTaskCreate(AppAutoExitService_Task,
+                                "AutoExit",
+                                APP_AUTO_EXIT_STACK_SIZE,
+                                NULL,
+                                APP_AUTO_EXIT_PRIORITY,
                                 NULL));
 }
