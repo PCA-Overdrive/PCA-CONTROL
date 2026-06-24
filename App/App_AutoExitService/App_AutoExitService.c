@@ -1,6 +1,6 @@
 #include "App_AutoExitService.h"
 #include "App_AutoExitService_Internal.h"
-
+#include "App_Can.h"
 #include "App_RxService.h"
 #include "task.h"
 
@@ -81,6 +81,15 @@ static void AppAutoExitService_SetCommand(uint8 driveCmd, uint8 steeringCmd)
     g_autoExitCmd.driveCmd = driveCmd;
     g_autoExitCmd.steeringCmd = steeringCmd;
     g_autoExitCmdValid = TRUE;
+}
+
+static void AppAutoExitService_SendExitComplete(uint8 exitComplete)
+{
+    ExitCompleteCmd_t tx;
+
+    tx.exitComplete = exitComplete;
+
+    (void)AppCan_SendExitComplete(&tx);
 }
 
 static void AppAutoExitService_EnterIdle(void)
@@ -205,6 +214,7 @@ static void AppAutoExitService_ServiceProfile(void)
 
     if(g_activeStepIndex >= g_activeProfileCount)
     {
+        AppAutoExitService_SendExitComplete(0x01u);
         AppAutoExitService_StopProfile();
         return;
     }
@@ -273,6 +283,8 @@ static void AppAutoExitService_StartAutoExit(AppAutoExitDirection direction)
     {
         return;
     }
+
+    AppAutoExitService_SendExitComplete(0x00u);
 
     g_exitDirection = direction;
 
