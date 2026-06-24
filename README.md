@@ -7,7 +7,7 @@
 - CAN Rx 최신값 mailbox 구조
 - `0x200`, `0x201`, `0x300` 수신값 파싱해서 구조체에 저장(RxService)
 - PDW 거리 단계 판단
-- `0x400` PDW 상태 송신(401, 100d은 아직 안 함)
+- `0x400` PDW 상태 송신(0x401, 0x100은 해야 함)
 
 TO-DO
 
@@ -15,6 +15,8 @@ TO-DO
 - Driving service
 - `0x401` 출차 완료 송신 로직
 - `0x100` 차량 제어 송신 로직
+<img width="1536" height="1024" alt="ChatGPT Image 2026년 6월 24일 오전 04_55_08" src="https://github.com/user-attachments/assets/c5dd8e53-f8b3-4840-967b-d7f1861aade3" />
+
 
 ## Folder Structure
 
