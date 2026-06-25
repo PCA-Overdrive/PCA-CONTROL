@@ -294,6 +294,45 @@ void AppAutoExitMonitor_SetResult(AppAutoExitStatus status)
 }
 
 /*
+ * 자동출차 진행 중 목표 yaw에 도달했는지 확인
+ *
+ * AVOID 후 resume profile의 마지막 회전 step에서 사용한다.
+ * 목표 yaw는 자동출차 시작 시점의 yaw와 목표 회전각으로 계산되어 있다.
+ */
+boolean AppAutoExitMonitor_IsTargetYawReached(void)
+{
+#if (APP_AUTO_EXIT_YAW_VALIDATION_ENABLE == 0u)
+    return FALSE;
+#else
+    sint16 absYawErrorDeg;
+
+    if(g_monitor.status != APP_AUTO_EXIT_STATUS_IN_PROGRESS)
+    {
+        return FALSE;
+    }
+
+    /*
+     * 최신 IMU yaw를 읽어서 yawErrorDeg를 갱신한다.
+     */
+    AppAutoExitMonitor_CaptureEndYaw();
+
+    if(g_monitor.yawValid == FALSE)
+    {
+        return FALSE;
+    }
+
+    absYawErrorDeg = g_monitor.yawErrorDeg;
+
+    if(absYawErrorDeg < 0)
+    {
+        absYawErrorDeg = (sint16)(-absYawErrorDeg);
+    }
+
+    return (absYawErrorDeg <= APP_AUTO_EXIT_YAW_TARGET_TOL_DEG) ? TRUE : FALSE;
+#endif
+}
+
+/*
  * 자동출차 종료 시 yaw 검증 수행
  *
  * 현재 yaw를 한 번 더 캡처한 뒤,

@@ -4,8 +4,7 @@
 #include "App_AutoExitConfig.h"
 #include "App_AutoExitTypes.h"
 
-const AppAutoExitMotionStep *AppAutoExitProfile_Get(AppAutoExitDirection direction,
-                                                    uint32 *profileCount);
+const AppAutoExitMotionStep *AppAutoExitProfile_Get(AppAutoExitDirection direction, uint32 *profileCount);
 
 boolean AppAutoExitPlanner_IsStepSafetyDanger(const AppAutoExitMotionStep *step);
 
@@ -13,6 +12,8 @@ AppAutoExitStrategy AppAutoExitPlanner_SelectStrategy(AppAutoExitDirection exitD
                                                       AppAutoExitAvoidPlan *avoidPlan);
 
 AppAutoExitAvoidObstacleState AppAutoExitPlanner_GetAvoidObstacleState(AppAutoExitDirection exitDirection, AppAutoExitAvoidPhase phase);
+
+boolean AppAutoExitMonitor_IsTargetYawReached(void);
 
 void AppAutoExitMonitor_Init(void);
 void AppAutoExitMonitor_Start(AppAutoExitDirection direction);

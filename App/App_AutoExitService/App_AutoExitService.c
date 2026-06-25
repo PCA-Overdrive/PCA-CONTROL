@@ -76,6 +76,21 @@ typedef struct
      * 첫 번째 step 시간을 줄이기 위한 값
      */
     uint32 firstStepReductionMs;
+
+    /*
+     * TRUE이면 특정 회전 step은 시간 기준이 아니라
+     * IMU 목표 yaw 도달 기준으로 종료한다.
+     *
+     * NORMAL 출차에서는 FALSE.
+     * AVOID 후 profile 재개에서만 TRUE.
+     */
+    boolean yawStopEnabled;
+
+    /*
+     * IMU yaw 기준으로 종료할 profile step index.
+     * AVOID 후 resume profile에서 마지막 회전 step을 가리킨다.
+     */
+    uint32 yawStopStepIndex;
 } AppAutoExitProfileRuntime;
 
 typedef struct
@@ -169,6 +184,8 @@ static void AppAutoExitService_ResetProfile(void)
     g_autoExit.profile.index = 0u;
     g_autoExit.profile.startTick = 0u;
     g_autoExit.profile.firstStepReductionMs = 0u;
+    g_autoExit.profile.yawStopEnabled = FALSE;
+    g_autoExit.profile.yawStopStepIndex = 0u;
 }
 
 /*
@@ -300,17 +317,16 @@ static void AppAutoExitService_StopProfile(void)
  * 출차 방향에 맞는 profile을 가져와 실행 시작
  */
 static void AppAutoExitService_StartProfileForDirection(AppAutoExitDirection direction,
-                                                        uint32 firstStepReductionMs)
+                                                        uint32 firstStepReductionMs,
+                                                        boolean yawStopEnabled)
 {
     const AppAutoExitMotionStep *profile;
     uint32 profileCount;
+    uint32 index;
+    uint32 searchIndex;
 
     profile = AppAutoExitProfile_Get(direction, &profileCount);
 
-    /*
-     * profile이 없거나 step 개수가 0이면
-     * 실행할 수 없으므로 BLOCKED 처리
-     */
     if((profile == 0) || (profileCount == 0u))
     {
         AppAutoExitService_EnterBlocked();
@@ -323,12 +339,36 @@ static void AppAutoExitService_StartProfileForDirection(AppAutoExitDirection dir
     g_autoExit.profile.firstStepReductionMs = firstStepReductionMs;
     g_autoExit.profile.startTick = xTaskGetTickCount();
 
+    g_autoExit.profile.yawStopEnabled = FALSE;
+    g_autoExit.profile.yawStopStepIndex = 0u;
+
+    /*
+     * AVOID 후 profile 재개에서는 마지막 회전 step을
+     * 시간 기준이 아니라 IMU 목표 yaw 기준으로 종료한다.
+     *
+     * 마지막 회전 step:
+     *  - driveCmd가 STOP이 아니고
+     *  - steeringCmd가 CENTER가 아닌 마지막 step
+     */
+    if(yawStopEnabled == TRUE)
+    {
+        for(index = profileCount; index > 0u; index--)
+        {
+            searchIndex = index - 1u;
+
+            if((profile[searchIndex].driveCmd != APP_AUTO_EXIT_DRIVE_STOP) &&
+               (profile[searchIndex].steeringCmd != APP_AUTO_EXIT_STEER_CENTER))
+            {
+                g_autoExit.profile.yawStopEnabled = TRUE;
+                g_autoExit.profile.yawStopStepIndex = searchIndex;
+                break;
+            }
+        }
+    }
+
     g_autoExit.active = TRUE;
     g_autoExit.state = APP_AUTO_EXIT_STATE_RUN_PROFILE;
 
-    /*
-     * 첫 번째 step의 제어 명령을 바로 적용
-     */
     AppAutoExitService_SetCommand(g_autoExit.profile.steps[0].driveCmd,
                                   g_autoExit.profile.steps[0].steeringCmd);
 }
@@ -373,14 +413,16 @@ static uint32 AppAutoExitService_GetCurrentStepDurationMs(void)
  */
 static void AppAutoExitService_CompleteProfile(void)
 {
-    if(AppAutoExitMonitor_FinishAndValidate() == TRUE)
-    {
-        AppAutoExitMonitor_SetResult(APP_AUTO_EXIT_STATUS_COMPLETE);
-    }
-    else
-    {
-        AppAutoExitMonitor_SetResult(APP_AUTO_EXIT_STATUS_BLOCKED);
-    }
+    /*
+     * NORMAL 출차:
+     *  - 하드코딩 profile을 끝까지 수행했으면 COMPLETE.
+     *
+     * AVOID 출차:
+     *  - 마지막 회전 step에서 이미 IMU 목표 yaw 도달을 확인해야만
+     *    다음 step으로 넘어올 수 있다.
+     *  - 따라서 profile 끝까지 왔으면 COMPLETE.
+     */
+    AppAutoExitMonitor_SetResult(APP_AUTO_EXIT_STATUS_COMPLETE);
 
     AppAutoExitService_StopProfile();
 }
@@ -393,14 +435,15 @@ static void AppAutoExitService_CompleteProfile(void)
  */
 static void AppAutoExitService_ServiceProfile(void)
 {
+    uint32 currentStepDurationMs;
+    boolean yawStopStep;
+    boolean stepDone;
+
     if(g_autoExit.state != APP_AUTO_EXIT_STATE_RUN_PROFILE)
     {
         return;
     }
 
-    /*
-     * profile이 비정상이면 중단
-     */
     if((g_autoExit.profile.steps == 0) ||
        (g_autoExit.profile.index >= g_autoExit.profile.count))
     {
@@ -408,9 +451,6 @@ static void AppAutoExitService_ServiceProfile(void)
         return;
     }
 
-    /*
-     * 현재 step 방향 기준으로 DANGER가 있으면 출차 불가 처리
-     */
     if(AppAutoExitPlanner_IsStepSafetyDanger(
            &g_autoExit.profile.steps[g_autoExit.profile.index]) == TRUE)
     {
@@ -418,32 +458,68 @@ static void AppAutoExitService_ServiceProfile(void)
         return;
     }
 
-    /*
-     * 현재 step duration이 아직 끝나지 않았으면 계속 같은 명령 유지
-     */
-    if(AppAutoExitService_HasElapsed(g_autoExit.profile.startTick,
-                                     AppAutoExitService_GetCurrentStepDurationMs()) == FALSE)
+    currentStepDurationMs = AppAutoExitService_GetCurrentStepDurationMs();
+
+    yawStopStep =
+        ((g_autoExit.profile.yawStopEnabled == TRUE) &&
+         (g_autoExit.profile.index == g_autoExit.profile.yawStopStepIndex)) ? TRUE : FALSE;
+
+    stepDone = FALSE;
+
+    if(yawStopStep == TRUE)
+    {
+        /*
+         * AVOID 후 마지막 회전 step은 시간으로 끝내지 않는다.
+         * IMU 목표 yaw에 도달해야 다음 step으로 넘어간다.
+         */
+        if(AppAutoExitMonitor_IsTargetYawReached() == TRUE)
+        {
+            stepDone = TRUE;
+        }
+        else if(AppAutoExitService_HasElapsed(g_autoExit.profile.startTick,
+                                              currentStepDurationMs) == TRUE)
+        {
+            /*
+             * 시간은 완료 조건이 아니라 안전 timeout으로만 사용한다.
+             * 목표 yaw에 도달하지 못한 채 timeout이 지나면 실패로 본다.
+             */
+            AppAutoExitService_EnterBlocked();
+            return;
+        }
+        else
+        {
+            return;
+        }
+    }
+    else
+    {
+        /*
+         * NORMAL profile step 또는 AVOID의 일반 step은 기존처럼 시간 기준.
+         */
+        if(AppAutoExitService_HasElapsed(g_autoExit.profile.startTick,
+                                         currentStepDurationMs) == TRUE)
+        {
+            stepDone = TRUE;
+        }
+        else
+        {
+            return;
+        }
+    }
+
+    if(stepDone == FALSE)
     {
         return;
     }
 
-    /*
-     * 현재 step 완료 → 다음 step으로 이동
-     */
     g_autoExit.profile.index++;
 
-    /*
-     * 모든 step이 끝났으면 profile 완료 처리
-     */
     if(g_autoExit.profile.index >= g_autoExit.profile.count)
     {
         AppAutoExitService_CompleteProfile();
         return;
     }
 
-    /*
-     * 다음 step 시작
-     */
     g_autoExit.profile.startTick = xTaskGetTickCount();
 
     AppAutoExitService_SetCommand(
@@ -619,8 +695,7 @@ static void AppAutoExitService_StartAutoExit(AppAutoExitDirection direction)
      */
     if(direction == APP_AUTO_EXIT_DIR_STRAIGHT)
     {
-        AppAutoExitService_StartProfileForDirection(APP_AUTO_EXIT_DIR_STRAIGHT,
-                                                    0u);
+        AppAutoExitService_StartProfileForDirection(APP_AUTO_EXIT_DIR_STRAIGHT, 0u, FALSE);
         return;
     }
 
@@ -683,7 +758,7 @@ static void AppAutoExitService_StartResumeExitProfile(void)
     firstStepReductionMs =
         AppAutoExitService_CalcFirstStepReductionMs(g_autoExit.avoid.escapeElapsedMs, g_autoExit.avoid.plan.realignMs);
 
-    AppAutoExitService_StartProfileForDirection(g_autoExit.direction, firstStepReductionMs);
+    AppAutoExitService_StartProfileForDirection(g_autoExit.direction, firstStepReductionMs, TRUE);
 }
 
 /*
@@ -727,7 +802,7 @@ static void AppAutoExitService_ServiceState(void)
 
             if(strategy == APP_AUTO_EXIT_STRATEGY_NORMAL)
             {
-                AppAutoExitService_StartProfileForDirection(g_autoExit.direction, 0u);
+                AppAutoExitService_StartProfileForDirection(g_autoExit.direction, 0u, FALSE);
             }
             else if(strategy == APP_AUTO_EXIT_STRATEGY_AVOID_AND_RESUME)
             {
