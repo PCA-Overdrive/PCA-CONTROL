@@ -3,37 +3,40 @@
 #include "App_PdwService.h"
 
 /*
- * 출차 방향 쪽의 측면 거리 정보를 정리한 구조체
+ * 출차 방향 쪽의 측면 거리 특징값을 정리한 구조체
  *
  * 예를 들어 우측 출차라면:
- *  - frontMm : 오른쪽 앞 초음파 거리
- *  - rearMm  : 오른쪽 뒤 초음파 거리
+ *  - frontMm : 오른쪽 앞 측면 초음파 거리
+ *  - rearMm  : 오른쪽 뒤 측면 초음파 거리
  *
- * 이 정보를 이용해서
- *  1. 옆 차량이 가까운지
- *  2. 앞쪽이 더 가까운지
- *  3. 뒤쪽이 더 가까운지
- *  4. 회피가 필요한지
- * 판단한다.
+ * diffMm:
+ *  - frontMm - rearMm
+ *  - diffMm < 0이면 앞쪽이 더 가까운 상태
+ *  - diffMm > 0이면 뒤쪽이 더 가까운 상태
+ *
+ * frontCornerPredMm:
+ *  - 측면 앞 센서보다 더 앞에 있는 실제 앞코너 쪽 거리를
+ *    앞/뒤 거리 기울기로 단순 선형 예측한 값
+ *
+ * isFarSafe:
+ *  - 앞쪽, 뒤쪽, 예측 앞코너가 모두 충분히 멀어
+ *    기울어져 있어도 NORMAL로 볼 수 있는 상태
+ *
+ * isFrontCloser / isRearCloser:
+ *  - 앞/뒤 거리 차이가 TILT_DIFF 이상일 때만 TRUE
+ *  - 애매한 거리 구간에서 기울기 방향을 판단하는 데 사용
  */
 typedef struct
 {
-    /* 측면 앞쪽 거리 */
     uint16 frontMm;
-
-    /* 측면 뒤쪽 거리 */
     uint16 rearMm;
-
-    /* 앞/뒤 중 더 가까운 거리 */
     uint16 minMm;
 
-    /* 앞/뒤 모두 안전 거리보다 멀면 TRUE */
-    boolean isSafe;
+    sint32 diffMm;
+    sint32 frontCornerPredMm;
 
-    /* 앞쪽이 뒤쪽보다 확실히 가까운 경우 TRUE */
+    boolean isFarSafe;
     boolean isFrontCloser;
-
-    /* 뒤쪽이 앞쪽보다 확실히 가까운 경우 TRUE */
     boolean isRearCloser;
 } AppAutoExitSideInfo;
 
@@ -42,20 +45,16 @@ typedef struct
  *
  * exitSide:
  *  - 실제로 나가려는 방향의 측면 정보
+ *  - NORMAL / AVOID / BLOCKED 판단의 기준
  *
  * oppositeSide:
- *  - 회피할 때 반대로 붙게 되는 쪽의 측면 정보
- *
- * exitFrontCornerMm:
- *  - 나가려는 방향의 전방 코너 거리
- *  - 좌측 출차면 FRONT_LEFT
- *  - 우측 출차면 FRONT_RIGHT
+ *  - AVOID 시 차량이 먼저 피하게 되는 반대 방향의 측면 정보
+ *  - 이쪽이 충분히 안전해야 AVOID_AND_RESUME 가능
  */
 typedef struct
 {
     AppAutoExitSideInfo exitSide;
     AppAutoExitSideInfo oppositeSide;
-    uint16 exitFrontCornerMm;
 } AppAutoExitSideContext;
 
 /*
@@ -96,71 +95,91 @@ static boolean AppAutoExitPlanner_IsAnyLevelAtLeast(
 /*
  * 측면 앞/뒤 거리값을 이용해 AppAutoExitSideInfo 생성
  *
- * 여기서 판단하는 것:
- *  1. 앞/뒤 중 최소 거리
- *  2. 양쪽 모두 충분히 멀어서 안전한지
- *  3. 옆 차량이 기울어져 보이는지
- *     - 앞쪽이 더 가까우면 isFrontCloser
- *     - 뒤쪽이 더 가까우면 isRearCloser
+ * 이 함수는 단순히 앞/뒤 거리를 저장하는 것이 아니라,
+ * 옆 차량 또는 장애물이 내 차와 평행한지, 앞쪽으로 가까워지는지,
+ * 뒤쪽으로 가까워지는지를 판단하기 위한 특징값을 만든다.
  *
- * 기울기 판단은 단순히 앞/뒤 거리 차이가
- * APP_AUTO_EXIT_SIDE_TILT_DIFF_MM 이상 벌어지는지로 판단한다.
+ * 핵심 계산:
+ *  1. minMm
+ *     - 앞/뒤 중 더 가까운 거리
+ *
+ *  2. diffMm = frontMm - rearMm
+ *     - diffMm < 0: 앞쪽이 더 가까움
+ *     - diffMm > 0: 뒤쪽이 더 가까움
+ *
+ *  3. frontCornerPredMm
+ *     - 측면 앞 센서보다 더 앞에 있는 실제 앞코너 예상 거리
+ *     - 옆차가 앞쪽으로 기울어져 있으면 front 센서값보다
+ *       실제 앞코너 쪽이 더 가까울 수 있으므로 이를 보정
+ *
+ *  4. isFarSafe
+ *     - 앞/뒤 센서와 예측 앞코너가 모두 FAR_SAFE 이상이면 TRUE
+ *
+ *  5. isFrontCloser / isRearCloser
+ *     - 앞/뒤 거리 차이가 TILT_DIFF 이상일 때만 기울어진 상태로 판단
  */
-static AppAutoExitSideInfo AppAutoExitPlanner_MakeSideInfo(uint16 frontMm,
-                                                           uint16 rearMm)
+static AppAutoExitSideInfo AppAutoExitPlanner_MakeSideInfo(uint16 frontMm, uint16 rearMm)
 {
     AppAutoExitSideInfo info;
-    sint32 diffMm;
 
     info.frontMm = frontMm;
     info.rearMm = rearMm;
-
-    /* 앞/뒤 중 더 가까운 값을 minMm으로 저장 */
     info.minMm = (frontMm < rearMm) ? frontMm : rearMm;
 
     /*
-     * 앞/뒤 모두 SIDE_SAFE_MM보다 멀면 측면이 안전하다고 판단
-     */
-    info.isSafe = ((frontMm > APP_AUTO_EXIT_SIDE_SAFE_MM) &&
-                   (rearMm > APP_AUTO_EXIT_SIDE_SAFE_MM)) ? TRUE : FALSE;
-
-    /*
-     * 앞쪽 거리 - 뒤쪽 거리
-     *
      * diffMm < 0:
-     *  - frontMm이 rearMm보다 작음
-     *  - 즉 앞쪽이 더 가까움
+     * - frontMm이 rearMm보다 작음
+     * - 앞쪽으로 갈수록 더 좁아지는 형태
      *
      * diffMm > 0:
-     *  - rearMm이 frontMm보다 작음
-     *  - 즉 뒤쪽이 더 가까움
+     * - rearMm이 frontMm보다 작음
+     * - 앞쪽으로 갈수록 공간이 열리는 형태
      */
-    diffMm = (sint32)frontMm - (sint32)rearMm;
+    info.diffMm = (sint32)frontMm - (sint32)rearMm;
 
-    if(diffMm < -(sint32)APP_AUTO_EXIT_SIDE_TILT_DIFF_MM)
+    /*
+     * 측면 앞/뒤 초음파 거리 차이를 이용해
+     * front sensor보다 더 앞에 있는 실제 앞코너 거리값을 단순 선형 외삽한다.
+     *
+     * 가정:
+     *  - 옆 차량 또는 장애물의 측면이 대략 직선 형태라고 본다.
+     *  - front/rear 초음파는 같은 측면을 바라보고 있다고 본다.
+     *
+     * diffMm < 0:
+     *  - 앞쪽 센서가 뒤쪽 센서보다 더 가까움
+     *  - 앞코너로 갈수록 거리가 더 작아질 수 있음
+     *
+     * diffMm > 0:
+     *  - 뒤쪽 센서가 앞쪽 센서보다 더 가까움
+     *  - 앞코너 방향으로는 공간이 열리는 형태
+     */
+    info.frontCornerPredMm =
+        (sint32)frontMm +
+        ((info.diffMm * (sint32)APP_AUTO_EXIT_SIDE_FRONT_OVERHANG_MM) /
+         (sint32)APP_AUTO_EXIT_SIDE_SENSOR_SPACING_MM);
+
+    if(info.frontCornerPredMm < 0)
     {
-        /*
-         * 앞쪽이 확실히 더 가까운 경우
-         * 출차 방향 앞쪽에 여유가 부족하므로 긴 회피가 필요할 수 있음
-         */
+        info.frontCornerPredMm = 0;
+    }
+
+    info.isFarSafe =
+        ((frontMm >= APP_AUTO_EXIT_SIDE_FAR_SAFE_MM) &&
+         (rearMm >= APP_AUTO_EXIT_SIDE_FAR_SAFE_MM) &&
+         (info.frontCornerPredMm >= (sint32)APP_AUTO_EXIT_SIDE_FAR_SAFE_MM)) ? TRUE : FALSE;
+
+    if(info.diffMm < -(sint32)APP_AUTO_EXIT_SIDE_TILT_DIFF_MM)
+    {
         info.isFrontCloser = TRUE;
         info.isRearCloser = FALSE;
     }
-    else if(diffMm > (sint32)APP_AUTO_EXIT_SIDE_TILT_DIFF_MM)
+    else if(info.diffMm > (sint32)APP_AUTO_EXIT_SIDE_TILT_DIFF_MM)
     {
-        /*
-         * 뒤쪽이 확실히 더 가까운 경우
-         * 후방 쪽이 좁은 상황으로 보고 짧은 회피가 필요할 수 있음
-         */
         info.isFrontCloser = FALSE;
         info.isRearCloser = TRUE;
     }
     else
     {
-        /*
-         * 앞/뒤 거리 차이가 크지 않으면
-         * 옆 차량이 크게 기울어진 상황은 아니라고 판단
-         */
         info.isFrontCloser = FALSE;
         info.isRearCloser = FALSE;
     }
@@ -169,68 +188,154 @@ static AppAutoExitSideInfo AppAutoExitPlanner_MakeSideInfo(uint16 frontMm,
 }
 
 /*
- * 출차 방향 측면 정보를 보고 회피 정도를 결정
+ * 출차 방향 측면의 위험 형태를 분류한다.
  *
- * 반환값:
- *  - APP_AUTO_EXIT_AVOID_NONE  : 회피 필요 없음
- *  - APP_AUTO_EXIT_AVOID_SHORT : 짧은 회피 필요
- *  - APP_AUTO_EXIT_AVOID_LONG  : 긴 회피 필요
+ * 이 함수의 목적은 NORMAL / AVOID / BLOCKED를 직접 결정하는 것이 아니라,
+ * 출차 방향 측면이 왜 위험한지를 분류하는 것이다.
  *
- * 판단 우선순위:
- *  1. 측면 최소 거리가 너무 가까우면 LONG
- *  2. 앞쪽이 caution 거리보다 가까우면 LONG
- *  3. 뒤쪽이 caution 거리보다 가까우면 SHORT
- *  4. 앞쪽이 더 가까운 형태로 기울어져 있고 안전거리보다 가까우면 LONG
- *  5. 뒤쪽이 더 가까운 형태로 기울어져 있고 안전거리보다 가까우면 SHORT
+ * 판단 개념:
+ *  1. 너무 가까우면 CRITICAL
+ *  2. 앞/뒤/예측 앞코너가 모두 충분히 멀면 SAFE
+ *  3. 앞/뒤가 모두 가까우면 NARROW_BOTH
+ *  4. 앞쪽 자체가 가까우면 NEAR_FRONT
+ *  5. 뒤쪽 자체가 가까우면 NEAR_REAR
+ *  6. 센서값 자체는 괜찮아 보여도 예측 앞코너가 가까우면 TILTED_FRONT
+ *  7. 애매한 거리 구간에서 앞쪽으로 좁아지는 기울기면 TILTED_FRONT
+ *  8. 애매한 거리 구간에서 뒤쪽이 더 가까워 앞쪽이 열리는 형태면 TILTED_REAR
+ *
+ * SIDE_RISK_SAFE:
+ *  - 기울기가 있어도 충분히 멀어 NORMAL 가능
+ *
+ * SIDE_RISK_TILTED_FRONT:
+ *  - 앞쪽으로 갈수록 공간이 좁아지는 형태
+ *  - 앞으로 조향해 나갈 때 앞코너 간섭 가능성이 커서 LONG 회피 대상
+ *
+ * SIDE_RISK_TILTED_REAR:
+ *  - 뒤쪽이 더 가까우나 앞쪽 방향은 열려 있는 형태
+ *  - 짧은 회피로 뒤쪽 간섭만 줄이면 되는 SHORT 회피 대상
  */
-static AppAutoExitAvoidLevel AppAutoExitPlanner_GetAvoidLevel(const AppAutoExitSideInfo *exitSide)
+static AppAutoExitSideRisk AppAutoExitPlanner_GetSideRisk(
+    const AppAutoExitSideInfo *side)
 {
-    /*
-     * 출차 방향 측면 자체가 너무 가까우면
-     * 짧게 피해서는 부족하므로 긴 회피
-     */
-    if(exitSide->minMm < APP_AUTO_EXIT_SIDE_BLOCKED_MM)
+    if(side == 0)
     {
-        return APP_AUTO_EXIT_AVOID_LONG;
+        /*
+         * 내부 static 함수라 NULL이 들어올 가능성은 낮지만,
+         * 안전 쪽으로 보수적으로 판단한다.
+         */
+        return APP_AUTO_EXIT_SIDE_RISK_CRITICAL;
     }
 
     /*
-     * 앞쪽이 가까우면 출차하며 회전할 때 앞 코너가 걸릴 수 있으므로 긴 회피
+     * 1. 너무 가까움
      */
-    if(exitSide->frontMm < APP_AUTO_EXIT_SIDE_FRONT_CAUTION_MM)
+    if(side->minMm < APP_AUTO_EXIT_SIDE_CRITICAL_MM)
     {
-        return APP_AUTO_EXIT_AVOID_LONG;
+        return APP_AUTO_EXIT_SIDE_RISK_CRITICAL;
     }
 
     /*
-     * 뒤쪽이 가까우면 초기 출차 시 뒤쪽 간섭 가능성이 있으므로 짧은 회피
+     * 2. 둘 다 충분히 멀면 기울기 있어도 NORMAL
      */
-    if(exitSide->rearMm < APP_AUTO_EXIT_SIDE_REAR_CAUTION_MM)
+    if(side->isFarSafe == TRUE)
     {
-        return APP_AUTO_EXIT_AVOID_SHORT;
+        return APP_AUTO_EXIT_SIDE_RISK_SAFE;
     }
 
     /*
-     * 옆차의 앞쪽이 더 가까운 기울어진 상태라면
-     * 앞으로 나갈 때 앞쪽 간섭 가능성이 커서 긴 회피
+     * 3. 앞/뒤 둘 다 가까운 좁은 공간
      */
-    if((exitSide->isFrontCloser == TRUE) &&
-       (exitSide->frontMm < APP_AUTO_EXIT_SIDE_SAFE_MM))
+    if((side->frontMm < APP_AUTO_EXIT_SIDE_NEAR_MM) &&
+       (side->rearMm < APP_AUTO_EXIT_SIDE_NEAR_MM))
     {
-        return APP_AUTO_EXIT_AVOID_LONG;
+        return APP_AUTO_EXIT_SIDE_RISK_NARROW_BOTH;
     }
 
     /*
-     * 옆차의 뒤쪽이 더 가까운 상태라면
-     * 후방 쪽 여유가 부족한 것으로 보고 짧은 회피
+     * 4. 앞쪽 자체가 가까움
      */
-    if((exitSide->isRearCloser == TRUE) &&
-       (exitSide->rearMm < APP_AUTO_EXIT_SIDE_SAFE_MM))
+    if(side->frontMm < APP_AUTO_EXIT_SIDE_NEAR_MM)
     {
-        return APP_AUTO_EXIT_AVOID_SHORT;
+        return APP_AUTO_EXIT_SIDE_RISK_NEAR_FRONT;
     }
 
-    return APP_AUTO_EXIT_AVOID_NONE;
+    /*
+     * 5. 뒤쪽 자체가 가까움
+     */
+    if(side->rearMm < APP_AUTO_EXIT_SIDE_NEAR_MM)
+    {
+        return APP_AUTO_EXIT_SIDE_RISK_NEAR_REAR;
+    }
+
+    /*
+     * 6. 앞코너 예측 위험
+     *
+     * front sensor 값은 NEAR 이상이라 괜찮아 보여도,
+     * 옆차가 앞쪽으로 기울어진 경우 실제 앞코너 쪽 거리는
+     * 더 가까워질 수 있다.
+     */
+    if(side->frontCornerPredMm < (sint32)APP_AUTO_EXIT_SIDE_NEAR_MM)
+    {
+        return APP_AUTO_EXIT_SIDE_RISK_TILTED_FRONT;
+    }
+
+    /*
+     * 7. 애매한 거리 구간에서 기울기 판단
+     */
+    if(side->isFrontCloser == TRUE)
+    {
+        return APP_AUTO_EXIT_SIDE_RISK_TILTED_FRONT;
+    }
+
+    if(side->isRearCloser == TRUE)
+    {
+        return APP_AUTO_EXIT_SIDE_RISK_TILTED_REAR;
+    }
+
+    return APP_AUTO_EXIT_SIDE_RISK_SAFE;
+}
+
+/*
+ * SideRisk 결과를 실제 회피량 SHORT / LONG으로 변환한다.
+ *
+ * LONG:
+ *  - 앞쪽이 가깝거나
+ *  - 앞쪽으로 갈수록 공간이 좁아지는 기울어진 경우
+ *  - 앞/뒤가 모두 좁은 경우
+ *  - 너무 가까워 짧은 회피로 부족한 경우
+ *
+ * SHORT:
+ *  - 뒤쪽이 가깝거나
+ *  - 애매한 거리 구간에서 뒤쪽이 더 가까워
+ *    앞쪽 진행 방향은 열려 있는 경우
+ *
+ * NONE:
+ *  - 기울기가 있어도 충분히 멀거나,
+ *    거리 차이가 작아 회피가 필요 없는 경우
+ */
+static AppAutoExitAvoidLevel AppAutoExitPlanner_GetAvoidLevel(
+    const AppAutoExitSideInfo *exitSide)
+{
+    AppAutoExitSideRisk risk;
+
+    risk = AppAutoExitPlanner_GetSideRisk(exitSide);
+
+    switch(risk)
+    {
+        case APP_AUTO_EXIT_SIDE_RISK_CRITICAL:
+        case APP_AUTO_EXIT_SIDE_RISK_NARROW_BOTH:
+        case APP_AUTO_EXIT_SIDE_RISK_NEAR_FRONT:
+        case APP_AUTO_EXIT_SIDE_RISK_TILTED_FRONT:
+            return APP_AUTO_EXIT_AVOID_LONG;
+
+        case APP_AUTO_EXIT_SIDE_RISK_NEAR_REAR:
+        case APP_AUTO_EXIT_SIDE_RISK_TILTED_REAR:
+            return APP_AUTO_EXIT_AVOID_SHORT;
+
+        case APP_AUTO_EXIT_SIDE_RISK_SAFE:
+        default:
+            return APP_AUTO_EXIT_AVOID_NONE;
+    }
 }
 
 /*
@@ -239,12 +344,10 @@ static AppAutoExitAvoidLevel AppAutoExitPlanner_GetAvoidLevel(const AppAutoExitS
  * 좌측 출차:
  *  - exitSide     = LEFT_FRONT / LEFT_BEHIND
  *  - oppositeSide = RIGHT_FRONT / RIGHT_BEHIND
- *  - exitFrontCornerMm = FRONT_LEFT
  *
  * 우측 출차:
  *  - exitSide     = RIGHT_FRONT / RIGHT_BEHIND
  *  - oppositeSide = LEFT_FRONT / LEFT_BEHIND
- *  - exitFrontCornerMm = FRONT_RIGHT
  *
  * 여기서는 PDW level이 아니라 distanceMm을 사용한다.
  * 이유:
@@ -266,8 +369,6 @@ static AppAutoExitSideContext AppAutoExitPlanner_MakeSideContext(
         context.oppositeSide = AppAutoExitPlanner_MakeSideInfo(
             pdw->distanceMm[APP_PDW_DIR_RIGHT_FRONT],
             pdw->distanceMm[APP_PDW_DIR_RIGHT_BEHIND]);
-
-        context.exitFrontCornerMm = pdw->distanceMm[APP_PDW_DIR_FRONT_LEFT];
     }
     else
     {
@@ -278,8 +379,6 @@ static AppAutoExitSideContext AppAutoExitPlanner_MakeSideContext(
         context.oppositeSide = AppAutoExitPlanner_MakeSideInfo(
             pdw->distanceMm[APP_PDW_DIR_LEFT_FRONT],
             pdw->distanceMm[APP_PDW_DIR_LEFT_BEHIND]);
-
-        context.exitFrontCornerMm = pdw->distanceMm[APP_PDW_DIR_FRONT_RIGHT];
     }
 
     return context;
@@ -305,7 +404,13 @@ static void AppAutoExitPlanner_SetAvoidPlan(AppAutoExitAvoidPlan *avoidPlan,
     {
         /*
          * 긴 회피:
-         * 옆차가 많이 가깝거나 앞쪽 간섭 위험이 큰 경우
+         *  - 앞쪽이 가깝거나
+         *  - 앞쪽으로 갈수록 공간이 좁아지는 기울어진 경우
+         *  - 앞/뒤가 모두 좁은 경우
+         *  - 너무 가까워 짧은 회피로 부족한 경우
+         *
+         * 즉, 앞으로 조향해 나갈 때 앞코너 또는 차체 진행 경로가
+         * 걸릴 가능성이 큰 경우.
          */
         avoidPlan->escapeMs = APP_AUTO_EXIT_AVOID_ESCAPE_LONG_MS;
         avoidPlan->realignMs = APP_AUTO_EXIT_AVOID_REALIGN_LONG_MS;
@@ -314,7 +419,11 @@ static void AppAutoExitPlanner_SetAvoidPlan(AppAutoExitAvoidPlan *avoidPlan,
     {
         /*
          * 짧은 회피:
-         * 약간의 보정만 필요한 경우
+         *  - 뒤쪽이 가깝거나
+         *  - 애매한 거리 구간에서 뒤쪽이 더 가까워
+         *    앞쪽 진행 방향은 열려 있는 경우
+         *
+         * 즉, 앞코너 위험보다는 초기 측면/뒤쪽 간섭을 줄이기 위한 회피.
          */
         avoidPlan->escapeMs = APP_AUTO_EXIT_AVOID_ESCAPE_SHORT_MS;
         avoidPlan->realignMs = APP_AUTO_EXIT_AVOID_REALIGN_SHORT_MS;
@@ -473,15 +582,24 @@ boolean AppAutoExitPlanner_IsStepSafetyDanger(const AppAutoExitMotionStep *step)
  *  2. PDW 상태 읽기 실패하면 NORMAL
  *  3. PDW 비활성이면 NORMAL
  *  4. 전방 또는 출차 방향 전방 코너가 DANGER면 BLOCKED
- *  5. 출차 방향 측면 거리를 보고 회피 필요성 판단
- *  6. 반대편이 안전하면 AVOID_AND_RESUME
- *  7. 반대편도 안전하지 않으면 BLOCKED
+ *
+ *  5. 출차 방향 측면 risk 계산
+ *     - SAFE이면 기울기가 있어도 충분히 멀다고 보고 NORMAL
+ *     - SAFE가 아니면 NORMAL 출차는 위험하거나 애매하다고 판단
+ *
+ *  6. 출차 방향이 SAFE가 아닌 경우,
+ *     반대편이 충분히 안전하면 AVOID_AND_RESUME
+ *     - risk 종류에 따라 SHORT / LONG 회피량 결정
+ *
+ *  7. 출차 방향도 SAFE가 아니고,
+ *     반대편도 충분히 안전하지 않으면 BLOCKED
  */
 AppAutoExitStrategy AppAutoExitPlanner_SelectStrategy(AppAutoExitDirection exitDirection,
                                                       AppAutoExitAvoidPlan *avoidPlan)
 {
     AppPdwState pdw;
     AppAutoExitSideContext sideContext;
+    AppAutoExitSideRisk exitRisk;
     AppAutoExitAvoidLevel avoidLevel;
 
     /*
@@ -500,6 +618,8 @@ AppAutoExitStrategy AppAutoExitPlanner_SelectStrategy(AppAutoExitDirection exitD
     /*
      * PDW 상태를 읽지 못하면 보수적으로 막는 대신,
      * 현재 로직에서는 NORMAL 출차로 진행한다.
+     *
+     * 안전 우선으로 바꾸려면 BLOCKED 반환을 고려할 수 있다.
      */
     if(AppPdwService_GetState(&pdw) != pdPASS)
     {
@@ -508,6 +628,9 @@ AppAutoExitStrategy AppAutoExitPlanner_SelectStrategy(AppAutoExitDirection exitD
 
     /*
      * PDW가 꺼져 있으면 출차 회피 판단을 하지 않고 NORMAL 진행
+     *
+     * 자동출차 중에는 App_PdwService 쪽에서 pdw.enabled가 TRUE가 되도록
+     * 보장하는 것이 좋다.
      */
     if(pdw.enabled == FALSE)
     {
@@ -515,8 +638,7 @@ AppAutoExitStrategy AppAutoExitPlanner_SelectStrategy(AppAutoExitDirection exitD
     }
 
     /*
-     * 출차 방향 기준으로
-     * exitSide / oppositeSide / exitFrontCornerMm 구성
+     * 출차 방향 기준으로 exitSide / oppositeSide 구성
      */
     sideContext = AppAutoExitPlanner_MakeSideContext(&pdw, exitDirection);
 
@@ -529,8 +651,8 @@ AppAutoExitStrategy AppAutoExitPlanner_SelectStrategy(AppAutoExitDirection exitD
     }
 
     /*
-     * 좌측 출차라면 FRONT_LEFT가 DANGER인지 확인
-     * 나가려는 쪽 앞 코너가 걸릴 수 있기 때문
+     * 좌측 출차라면 FRONT_LEFT가 DANGER인지 확인.
+     * 나가려는 쪽 앞 코너가 걸릴 수 있기 때문.
      */
     if(exitDirection == APP_AUTO_EXIT_DIR_LEFT)
     {
@@ -542,7 +664,7 @@ AppAutoExitStrategy AppAutoExitPlanner_SelectStrategy(AppAutoExitDirection exitD
     else
     {
         /*
-         * 우측 출차라면 FRONT_RIGHT가 DANGER인지 확인
+         * 우측 출차라면 FRONT_RIGHT가 DANGER인지 확인.
          */
         if(pdw.level[APP_PDW_DIR_FRONT_RIGHT] >= APP_PDW_LEVEL_DANGER)
         {
@@ -550,33 +672,30 @@ AppAutoExitStrategy AppAutoExitPlanner_SelectStrategy(AppAutoExitDirection exitD
         }
     }
 
-    /*
-     * 출차 방향 측면 거리/기울기를 보고 회피 필요 정도 계산
-     */
+    exitRisk = AppAutoExitPlanner_GetSideRisk(&sideContext.exitSide);
     avoidLevel = AppAutoExitPlanner_GetAvoidLevel(&sideContext.exitSide);
 
     /*
-     * 회피가 필요 없고, 출차 방향 측면이 안전하면 NORMAL 출차
+     * 출차 방향이 SAFE이면 NORMAL.
+     * 여기서 SAFE는 "충분히 멀어서 기울기 있어도 괜찮음"까지 포함한다.
      */
-    if((avoidLevel == APP_AUTO_EXIT_AVOID_NONE) &&
-       (sideContext.exitSide.isSafe == TRUE))
+    if(exitRisk == APP_AUTO_EXIT_SIDE_RISK_SAFE)
     {
         return APP_AUTO_EXIT_STRATEGY_NORMAL;
     }
 
     /*
-     * 출차 방향이 좁아서 회피가 필요할 때,
-     * 반대편이 안전하면 반대편으로 살짝 회피한 뒤 출차 진행
+     * 출차 방향이 위험하거나 애매한데,
+     * 반대편이 충분히 안전하면 AVOID.
      */
-    if(sideContext.oppositeSide.isSafe == TRUE)
+    if(sideContext.oppositeSide.isFarSafe == TRUE)
     {
-        /*
-         * avoidLevel이 NONE인데 여기까지 왔다는 것은
-         * exitSide가 완전히 안전하다고 보기 애매한 상황이므로
-         * 최소한 SHORT 회피를 적용한다.
-         */
         if(avoidLevel == APP_AUTO_EXIT_AVOID_NONE)
         {
+            /*
+             * 이론상 exitRisk가 SAFE가 아닌데 avoidLevel이 NONE이면 애매한 상태다.
+             * 이 경우 최소한의 보정으로 SHORT 회피를 준다.
+             */
             avoidLevel = APP_AUTO_EXIT_AVOID_SHORT;
         }
 
@@ -585,7 +704,8 @@ AppAutoExitStrategy AppAutoExitPlanner_SelectStrategy(AppAutoExitDirection exitD
     }
 
     /*
-     * 출차 방향도 애매하고, 반대편도 안전하지 않으면 출차 불가
+     * 출차 방향도 SAFE가 아니고,
+     * 반대편도 충분히 안전하지 않으면 BLOCKED.
      */
     return APP_AUTO_EXIT_STRATEGY_BLOCKED;
 }

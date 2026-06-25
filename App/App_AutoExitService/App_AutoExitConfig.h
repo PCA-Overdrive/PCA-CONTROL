@@ -26,18 +26,36 @@
 #define APP_AUTO_EXIT_MIN_STEP_MS      100u
 
 #define APP_AUTO_EXIT_START_STOP_MS          300u
+/*
+ * 측면 회피 판단 기준
+ *
+ * CRITICAL:
+ * - 이보다 가까우면 너무 위험한 거리
+ * - 짧은 회피로는 부족하므로 LONG 회피 후보
+ *
+ * NEAR:
+ * - 이보다 가까우면 거리만으로 AVOID 필요
+ *
+ * FAR_SAFE:
+ * - 앞/뒤 둘 다 이보다 멀면 기울어져 있어도 NORMAL
+ *
+ * TILT_DIFF:
+ * - 애매한 거리 구간에서 앞/뒤 거리 차이가 이 이상이면
+ *   옆차가 기울어진 것으로 판단
+ *
+ * SENSOR_SPACING:
+ * - 측면 앞 초음파와 뒤 초음파 사이의 차체 길이 방향 거리
+ *
+ * FRONT_OVERHANG:
+ * - 측면 앞 초음파 위치에서 실제 앞코너까지의 거리
+ */
+#define APP_AUTO_EXIT_SIDE_CRITICAL_MM           180u
+#define APP_AUTO_EXIT_SIDE_NEAR_MM               450u
+#define APP_AUTO_EXIT_SIDE_FAR_SAFE_MM           650u
+#define APP_AUTO_EXIT_SIDE_TILT_DIFF_MM           80u
 
-#define APP_AUTO_EXIT_FRONT_HARD_STOP_MM     250u
-#define APP_AUTO_EXIT_FRONT_BLOCKED_MM       350u
-#define APP_AUTO_EXIT_REAR_HARD_STOP_MM      250u
-
-#define APP_AUTO_EXIT_SIDE_SAFE_MM           450u
-#define APP_AUTO_EXIT_SIDE_MIN_MM            220u
-#define APP_AUTO_EXIT_SIDE_TILT_DIFF_MM      50u
-
-#define APP_AUTO_EXIT_SIDE_FRONT_CAUTION_MM  450u
-#define APP_AUTO_EXIT_SIDE_REAR_CAUTION_MM   400u
-#define APP_AUTO_EXIT_SIDE_BLOCKED_MM        180u
+#define APP_AUTO_EXIT_SIDE_SENSOR_SPACING_MM     700u
+#define APP_AUTO_EXIT_SIDE_FRONT_OVERHANG_MM     200u
 
 #define APP_AUTO_EXIT_AVOID_ESCAPE_MIN_MS    250u
 #define APP_AUTO_EXIT_AVOID_ESCAPE_SHORT_MS  700u
