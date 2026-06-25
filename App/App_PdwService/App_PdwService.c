@@ -42,7 +42,8 @@ void AppPdwService_Task(void *arg)
 }
 
 void AppPdwService_Process(const AppRpiInputState *rpiInput,
-                           const AppUltrasonicState *ultrasonic)
+                           const AppUltrasonicState *ultrasonic,
+                            const AppAutoParkingState *autoParkingState)
 {
     AppPdwState nextState;
     uint8 i;
@@ -51,10 +52,13 @@ void AppPdwService_Process(const AppRpiInputState *rpiInput,
         return;
     }
     AppPdwService_ClearState(&nextState);
-
+    
     // PDW 활성화 여부 결정: RPi에서 PDW 스위치가 켜져 있고, 기어가 P가 아닌 경우 활성화
-    nextState.enabled = ((rpiInput->pdwSwitchOn == TRUE) &&
-                         (rpiInput->gear != APP_GEAR_P)) ? TRUE : FALSE;
+    nextState.enabled = (
+                    (rpiInput->pdwSwitchOn == TRUE) && (rpiInput->gear != APP_GEAR_P)
+                    ||
+                    (autoParkingState != NULL && autoParkingState->autoexitCmd != APP_AUTO_EXIT_CMD_STOP && autoParkingState->autoexitCmd != APP_AUTO_EXIT_CMD_NORMAL)
+                    ) ? TRUE : FALSE;
 
     for(i = 0u; i < APP_PDW_DIRECTION_COUNT; i++)
     {

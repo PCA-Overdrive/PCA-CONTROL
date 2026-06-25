@@ -8,7 +8,8 @@ void AppPdwService_Init(void);
 void AppPdwService_Task(void *arg);
 
 void AppPdwService_Process(const AppRpiInputState *rpiInput,
-                           const AppUltrasonicState *ultrasonic);
+                           const AppUltrasonicState *ultrasonic,
+                            const AppAutoParkingState *autoParkingState);
 
 BaseType_t AppPdwService_GetState(AppPdwState *state);
 
