@@ -56,10 +56,11 @@
 #define APP_AUTO_EXIT_RESULT_HOLD_MS      (2000u)
 
 #define APP_AUTO_EXIT_YAW_VALIDATION_ENABLE    (0u)
-
-#define APP_AUTO_EXIT_STRAIGHT_YAW_MAX_DEG     (20)
-#define APP_AUTO_EXIT_TURN_YAW_MIN_DEG         (45)
-#define APP_AUTO_EXIT_TURN_YAW_MAX_DEG         (130)
+#define APP_AUTO_EXIT_BASE_TURN_DEG            (90)
+#define APP_AUTO_EXIT_TARGET_TURN_MIN_DEG      (45)
+#define APP_AUTO_EXIT_TARGET_TURN_MAX_DEG      (135)
+#define APP_AUTO_EXIT_YAW_TARGET_TOL_DEG       (15)
+#define APP_AUTO_EXIT_IMU_RIGHT_SIGN           (1)
 
 #define APP_AUTO_EXIT_ARRAY_COUNT(array) \
     ((uint32)(sizeof(array) / sizeof((array)[0])))

@@ -18,42 +18,57 @@ typedef enum
     APP_AUTO_EXIT_STATE_STOPPED
 } AppAutoExitState;
 
-static boolean g_autoExitActive = FALSE;
-static boolean g_autoExitCmdValid = FALSE;
-static VehicleControlCmd_t g_autoExitCmd;
+typedef struct
+{
+    const AppAutoExitMotionStep *steps;
+    uint32 count;
+    uint32 index;
+    TickType_t startTick;
+    uint32 firstStepReductionMs;
+} AppAutoExitProfileRuntime;
 
-static AppAutoExitState g_autoExitState = APP_AUTO_EXIT_STATE_IDLE;
-static AppAutoExitDirection g_exitDirection = APP_AUTO_EXIT_DIR_STRAIGHT;
-static TickType_t g_stateStartTick = 0u;
+typedef struct
+{
+    uint32 escapeMs;
+    uint32 realignMs;
+    TickType_t escapeStartTick;
+    TickType_t realignStartTick;
+    uint32 escapeElapsedMs;
+} AppAutoExitAvoidRuntime;
 
-static const AppAutoExitMotionStep *g_activeProfile = 0;
-static uint32 g_activeProfileCount = 0u;
-static uint32 g_activeStepIndex = 0u;
-static TickType_t g_stepStartTick = 0u;
-static uint32 g_firstStepReductionMs = 0u;
+typedef struct
+{
+    boolean active;
+    boolean cmdValid;
+    VehicleControlCmd_t cmd;
+    AppAutoExitCmd lastCommand;
 
-static uint32 g_avoidEscapeMs = 0u;
-static uint32 g_avoidRealignMs = 0u;
-static TickType_t g_avoidEscapeStartTick = 0u;
-static TickType_t g_avoidRealignStartTick = 0u;
-static uint32 g_avoidEscapeElapsedMs = 0u;
+    AppAutoExitState state;
+    AppAutoExitDirection direction;
+    TickType_t stateStartTick;
+
+    AppAutoExitProfileRuntime profile;
+    AppAutoExitAvoidRuntime avoid;
+} AppAutoExitServiceContext;
+
+static AppAutoExitServiceContext g_autoExit;
 
 static void AppAutoExitService_ResetProfile(void)
 {
-    g_activeProfile = 0;
-    g_activeProfileCount = 0u;
-    g_activeStepIndex = 0u;
-    g_stepStartTick = 0u;
-    g_firstStepReductionMs = 0u;
+    g_autoExit.profile.steps = 0;
+    g_autoExit.profile.count = 0u;
+    g_autoExit.profile.index = 0u;
+    g_autoExit.profile.startTick = 0u;
+    g_autoExit.profile.firstStepReductionMs = 0u;
 }
 
 static void AppAutoExitService_ResetAvoidPlan(void)
 {
-    g_avoidEscapeMs = 0u;
-    g_avoidRealignMs = 0u;
-    g_avoidEscapeStartTick = 0u;
-    g_avoidRealignStartTick = 0u;
-    g_avoidEscapeElapsedMs = 0u;
+    g_autoExit.avoid.escapeMs = 0u;
+    g_autoExit.avoid.realignMs = 0u;
+    g_autoExit.avoid.escapeStartTick = 0u;
+    g_autoExit.avoid.realignStartTick = 0u;
+    g_autoExit.avoid.escapeElapsedMs = 0u;
 }
 
 static boolean AppAutoExitService_HasElapsed(TickType_t startTick,
@@ -77,17 +92,17 @@ static uint32 AppAutoExitService_GetElapsedMs(TickType_t startTick)
 
 static void AppAutoExitService_SetCommand(uint8 driveCmd, uint8 steeringCmd)
 {
-    g_autoExitCmd.driveCmd = driveCmd;
-    g_autoExitCmd.steeringCmd = steeringCmd;
-    g_autoExitCmdValid = TRUE;
+    g_autoExit.cmd.driveCmd = driveCmd;
+    g_autoExit.cmd.steeringCmd = steeringCmd;
+    g_autoExit.cmdValid = TRUE;
 }
 
 static void AppAutoExitService_EnterIdle(void)
 {
-    g_autoExitActive = FALSE;
-    g_autoExitCmdValid = FALSE;
-    g_autoExitState = APP_AUTO_EXIT_STATE_IDLE;
-    g_exitDirection = APP_AUTO_EXIT_DIR_STRAIGHT;
+    g_autoExit.active = FALSE;
+    g_autoExit.cmdValid = FALSE;
+    g_autoExit.state = APP_AUTO_EXIT_STATE_IDLE;
+    g_autoExit.direction = APP_AUTO_EXIT_DIR_STRAIGHT;
 
     AppAutoExitService_ResetProfile();
     AppAutoExitService_ResetAvoidPlan();
@@ -95,9 +110,9 @@ static void AppAutoExitService_EnterIdle(void)
 
 static void AppAutoExitService_EnterTimedStopState(AppAutoExitState state)
 {
-    g_autoExitActive = TRUE;
-    g_autoExitState = state;
-    g_stateStartTick = xTaskGetTickCount();
+    g_autoExit.active = TRUE;
+    g_autoExit.state = state;
+    g_autoExit.stateStartTick = xTaskGetTickCount();
 
     AppAutoExitService_SetCommand(APP_AUTO_EXIT_DRIVE_STOP,
                                   APP_AUTO_EXIT_STEER_CENTER);
@@ -119,8 +134,8 @@ static void AppAutoExitService_StopProfile(void)
 {
     AppAutoExitService_EnterIdle();
 
-    g_autoExitCmd.driveCmd = APP_AUTO_EXIT_DRIVE_STOP;
-    g_autoExitCmd.steeringCmd = APP_AUTO_EXIT_STEER_CENTER;
+    g_autoExit.cmd.driveCmd = APP_AUTO_EXIT_DRIVE_STOP;
+    g_autoExit.cmd.steeringCmd = APP_AUTO_EXIT_STEER_CENTER;
 }
 
 static void AppAutoExitService_StartProfile(const AppAutoExitMotionStep *profile,
@@ -133,17 +148,17 @@ static void AppAutoExitService_StartProfile(const AppAutoExitMotionStep *profile
         return;
     }
 
-    g_activeProfile = profile;
-    g_activeProfileCount = profileCount;
-    g_activeStepIndex = 0u;
-    g_firstStepReductionMs = firstStepReductionMs;
-    g_stepStartTick = xTaskGetTickCount();
+    g_autoExit.profile.steps = profile;
+    g_autoExit.profile.count = profileCount;
+    g_autoExit.profile.index = 0u;
+    g_autoExit.profile.firstStepReductionMs = firstStepReductionMs;
+    g_autoExit.profile.startTick = xTaskGetTickCount();
 
-    g_autoExitActive = TRUE;
-    g_autoExitState = APP_AUTO_EXIT_STATE_RUN_PROFILE;
+    g_autoExit.active = TRUE;
+    g_autoExit.state = APP_AUTO_EXIT_STATE_RUN_PROFILE;
 
-    AppAutoExitService_SetCommand(g_activeProfile[0].driveCmd,
-                                  g_activeProfile[0].steeringCmd);
+    AppAutoExitService_SetCommand(g_autoExit.profile.steps[0].driveCmd,
+                                  g_autoExit.profile.steps[0].steeringCmd);
 }
 
 static void AppAutoExitService_StartProfileForDirection(AppAutoExitDirection direction,
@@ -160,17 +175,18 @@ static uint32 AppAutoExitService_GetCurrentStepDurationMs(void)
 {
     uint32 durationMs;
 
-    durationMs = g_activeProfile[g_activeStepIndex].durationMs;
+    durationMs = g_autoExit.profile.steps[g_autoExit.profile.index].durationMs;
 
-    if((g_activeStepIndex == 0u) && (g_firstStepReductionMs > 0u))
+    if((g_autoExit.profile.index == 0u) &&
+       (g_autoExit.profile.firstStepReductionMs > 0u))
     {
-        if(g_firstStepReductionMs >= durationMs)
+        if(g_autoExit.profile.firstStepReductionMs >= durationMs)
         {
             durationMs = APP_AUTO_EXIT_MIN_STEP_MS;
         }
         else
         {
-            durationMs = durationMs - g_firstStepReductionMs;
+            durationMs = durationMs - g_autoExit.profile.firstStepReductionMs;
         }
     }
 
@@ -179,7 +195,7 @@ static uint32 AppAutoExitService_GetCurrentStepDurationMs(void)
 
 static void AppAutoExitService_CompleteProfile(void)
 {
-    if(AppAutoExitMonitor_FinishAndValidate(g_exitDirection) == TRUE)
+    if(AppAutoExitMonitor_FinishAndValidate() == TRUE)
     {
         AppAutoExitMonitor_SetResult(APP_AUTO_EXIT_STATUS_COMPLETE);
     }
@@ -193,59 +209,62 @@ static void AppAutoExitService_CompleteProfile(void)
 
 static void AppAutoExitService_ServiceProfile(void)
 {
-    if(g_autoExitState != APP_AUTO_EXIT_STATE_RUN_PROFILE)
+    if(g_autoExit.state != APP_AUTO_EXIT_STATE_RUN_PROFILE)
     {
         return;
     }
 
-    if((g_activeProfile == 0) || (g_activeStepIndex >= g_activeProfileCount))
+    if((g_autoExit.profile.steps == 0) ||
+       (g_autoExit.profile.index >= g_autoExit.profile.count))
     {
         AppAutoExitService_StopProfile();
         return;
     }
 
-    if(AppAutoExitPlanner_IsStepSafetyDanger(&g_activeProfile[g_activeStepIndex]) == TRUE)
+    if(AppAutoExitPlanner_IsStepSafetyDanger(
+           &g_autoExit.profile.steps[g_autoExit.profile.index]) == TRUE)
     {
         AppAutoExitService_EnterBlocked();
         return;
     }
 
-    if(AppAutoExitService_HasElapsed(g_stepStartTick,
+    if(AppAutoExitService_HasElapsed(g_autoExit.profile.startTick,
                                      AppAutoExitService_GetCurrentStepDurationMs()) == FALSE)
     {
         return;
     }
 
-    g_activeStepIndex++;
+    g_autoExit.profile.index++;
 
-    if(g_activeStepIndex >= g_activeProfileCount)
+    if(g_autoExit.profile.index >= g_autoExit.profile.count)
     {
         AppAutoExitService_CompleteProfile();
         return;
     }
 
-    g_stepStartTick = xTaskGetTickCount();
+    g_autoExit.profile.startTick = xTaskGetTickCount();
 
-    AppAutoExitService_SetCommand(g_activeProfile[g_activeStepIndex].driveCmd,
-                                  g_activeProfile[g_activeStepIndex].steeringCmd);
+    AppAutoExitService_SetCommand(
+        g_autoExit.profile.steps[g_autoExit.profile.index].driveCmd,
+        g_autoExit.profile.steps[g_autoExit.profile.index].steeringCmd);
 }
 
 static void AppAutoExitService_StartAvoidEscape(void)
 {
-    g_avoidEscapeStartTick = xTaskGetTickCount();
-    g_autoExitState = APP_AUTO_EXIT_STATE_AVOID_ESCAPE;
+    g_autoExit.avoid.escapeStartTick = xTaskGetTickCount();
+    g_autoExit.state = APP_AUTO_EXIT_STATE_AVOID_ESCAPE;
 
     AppAutoExitService_SetCommand(APP_AUTO_EXIT_DRIVE_FORWARD,
-                                  AppAutoExitPlanner_GetEscapeSteer(g_exitDirection));
+                                  AppAutoExitPlanner_GetEscapeSteer(g_autoExit.direction));
 }
 
 static void AppAutoExitService_FinishAvoidEscape(void)
 {
-    g_avoidEscapeElapsedMs =
-        AppAutoExitService_GetElapsedMs(g_avoidEscapeStartTick);
+    g_autoExit.avoid.escapeElapsedMs =
+        AppAutoExitService_GetElapsedMs(g_autoExit.avoid.escapeStartTick);
 
-    g_autoExitState = APP_AUTO_EXIT_STATE_AVOID_STOP_1;
-    g_stateStartTick = xTaskGetTickCount();
+    g_autoExit.state = APP_AUTO_EXIT_STATE_AVOID_STOP_1;
+    g_autoExit.stateStartTick = xTaskGetTickCount();
 
     AppAutoExitService_SetCommand(APP_AUTO_EXIT_DRIVE_STOP,
                                   APP_AUTO_EXIT_STEER_CENTER);
@@ -253,17 +272,17 @@ static void AppAutoExitService_FinishAvoidEscape(void)
 
 static void AppAutoExitService_StartAvoidRealign(void)
 {
-    g_avoidRealignStartTick = xTaskGetTickCount();
-    g_autoExitState = APP_AUTO_EXIT_STATE_AVOID_REALIGN;
+    g_autoExit.avoid.realignStartTick = xTaskGetTickCount();
+    g_autoExit.state = APP_AUTO_EXIT_STATE_AVOID_REALIGN;
 
     AppAutoExitService_SetCommand(APP_AUTO_EXIT_DRIVE_FORWARD,
-                                  AppAutoExitPlanner_GetRealignSteer(g_exitDirection));
+                                  AppAutoExitPlanner_GetRealignSteer(g_autoExit.direction));
 }
 
 static void AppAutoExitService_FinishAvoidRealign(void)
 {
-    g_autoExitState = APP_AUTO_EXIT_STATE_AVOID_STOP_2;
-    g_stateStartTick = xTaskGetTickCount();
+    g_autoExit.state = APP_AUTO_EXIT_STATE_AVOID_STOP_2;
+    g_autoExit.stateStartTick = xTaskGetTickCount();
 
     AppAutoExitService_SetCommand(APP_AUTO_EXIT_DRIVE_STOP,
                                   APP_AUTO_EXIT_STEER_CENTER);
@@ -273,25 +292,25 @@ static void AppAutoExitService_ApplyAvoidPlan(const AppAutoExitAvoidPlan *avoidP
 {
     if(avoidPlan == 0)
     {
-        g_avoidEscapeMs = 0u;
-        g_avoidRealignMs = 0u;
+        g_autoExit.avoid.escapeMs = 0u;
+        g_autoExit.avoid.realignMs = 0u;
         return;
     }
 
-    g_avoidEscapeMs = avoidPlan->escapeMs;
-    g_avoidRealignMs = avoidPlan->realignMs;
+    g_autoExit.avoid.escapeMs = avoidPlan->escapeMs;
+    g_autoExit.avoid.realignMs = avoidPlan->realignMs;
 }
 
 static void AppAutoExitService_StartAutoExit(AppAutoExitDirection direction)
 {
-    if(g_autoExitState != APP_AUTO_EXIT_STATE_IDLE)
+    if(g_autoExit.state != APP_AUTO_EXIT_STATE_IDLE)
     {
         return;
     }
 
     AppAutoExitMonitor_Start(direction);
 
-    g_exitDirection = direction;
+    g_autoExit.direction = direction;
 
     if(direction == APP_AUTO_EXIT_DIR_STRAIGHT)
     {
@@ -300,9 +319,9 @@ static void AppAutoExitService_StartAutoExit(AppAutoExitDirection direction)
         return;
     }
 
-    g_autoExitActive = TRUE;
-    g_autoExitState = APP_AUTO_EXIT_STATE_START_STOP;
-    g_stateStartTick = xTaskGetTickCount();
+    g_autoExit.active = TRUE;
+    g_autoExit.state = APP_AUTO_EXIT_STATE_START_STOP;
+    g_autoExit.stateStartTick = xTaskGetTickCount();
 
     AppAutoExitService_SetCommand(APP_AUTO_EXIT_DRIVE_STOP,
                                   APP_AUTO_EXIT_STEER_CENTER);
@@ -310,7 +329,7 @@ static void AppAutoExitService_StartAutoExit(AppAutoExitDirection direction)
 
 static void AppAutoExitService_StartNormalExitProfile(void)
 {
-    AppAutoExitService_StartProfileForDirection(g_exitDirection, 0u);
+    AppAutoExitService_StartProfileForDirection(g_autoExit.direction, 0u);
 }
 
 static void AppAutoExitService_StartResumeExitProfile(void)
@@ -318,10 +337,10 @@ static void AppAutoExitService_StartResumeExitProfile(void)
     uint32 firstStepReductionMs;
 
     firstStepReductionMs =
-        AppAutoExitPlanner_CalcFirstStepReductionMs(g_avoidEscapeElapsedMs,
-                                                    g_avoidRealignMs);
+        AppAutoExitPlanner_CalcFirstStepReductionMs(g_autoExit.avoid.escapeElapsedMs,
+                                                    g_autoExit.avoid.realignMs);
 
-    AppAutoExitService_StartProfileForDirection(g_exitDirection,
+    AppAutoExitService_StartProfileForDirection(g_autoExit.direction,
                                                 firstStepReductionMs);
 }
 
@@ -330,21 +349,21 @@ static void AppAutoExitService_ServiceState(void)
     AppAutoExitStrategy strategy;
     AppAutoExitAvoidPlan avoidPlan;
 
-    switch(g_autoExitState)
+    switch(g_autoExit.state)
     {
         case APP_AUTO_EXIT_STATE_IDLE:
             break;
 
         case APP_AUTO_EXIT_STATE_START_STOP:
-            if(AppAutoExitService_HasElapsed(g_stateStartTick,
+            if(AppAutoExitService_HasElapsed(g_autoExit.stateStartTick,
                                              APP_AUTO_EXIT_START_STOP_MS) == TRUE)
             {
-                g_autoExitState = APP_AUTO_EXIT_STATE_SELECT_STRATEGY;
+                g_autoExit.state = APP_AUTO_EXIT_STATE_SELECT_STRATEGY;
             }
             break;
 
         case APP_AUTO_EXIT_STATE_SELECT_STRATEGY:
-            strategy = AppAutoExitPlanner_SelectStrategy(g_exitDirection,
+            strategy = AppAutoExitPlanner_SelectStrategy(g_autoExit.direction,
                                                          &avoidPlan);
             AppAutoExitService_ApplyAvoidPlan(&avoidPlan);
 
@@ -363,9 +382,9 @@ static void AppAutoExitService_ServiceState(void)
             break;
 
         case APP_AUTO_EXIT_STATE_AVOID_ESCAPE:
-            if(AppAutoExitPlanner_IsOppositeSideDangerDuringAvoid(g_exitDirection) == TRUE)
+            if(AppAutoExitPlanner_IsOppositeSideDangerDuringAvoid(g_autoExit.direction) == TRUE)
             {
-                if(AppAutoExitService_HasElapsed(g_avoidEscapeStartTick,
+                if(AppAutoExitService_HasElapsed(g_autoExit.avoid.escapeStartTick,
                                                  APP_AUTO_EXIT_AVOID_ESCAPE_MIN_MS) == FALSE)
                 {
                     AppAutoExitService_EnterBlocked();
@@ -375,15 +394,15 @@ static void AppAutoExitService_ServiceState(void)
                     AppAutoExitService_FinishAvoidEscape();
                 }
             }
-            else if(AppAutoExitService_HasElapsed(g_avoidEscapeStartTick,
-                                                  g_avoidEscapeMs) == TRUE)
+            else if(AppAutoExitService_HasElapsed(g_autoExit.avoid.escapeStartTick,
+                                                  g_autoExit.avoid.escapeMs) == TRUE)
             {
                 AppAutoExitService_FinishAvoidEscape();
             }
             break;
 
         case APP_AUTO_EXIT_STATE_AVOID_STOP_1:
-            if(AppAutoExitService_HasElapsed(g_stateStartTick,
+            if(AppAutoExitService_HasElapsed(g_autoExit.stateStartTick,
                                              APP_AUTO_EXIT_SHIFT_STOP_MS) == TRUE)
             {
                 AppAutoExitService_StartAvoidRealign();
@@ -391,15 +410,15 @@ static void AppAutoExitService_ServiceState(void)
             break;
 
         case APP_AUTO_EXIT_STATE_AVOID_REALIGN:
-            if(AppAutoExitService_HasElapsed(g_avoidRealignStartTick,
-                                             g_avoidRealignMs) == TRUE)
+            if(AppAutoExitService_HasElapsed(g_autoExit.avoid.realignStartTick,
+                                             g_autoExit.avoid.realignMs) == TRUE)
             {
                 AppAutoExitService_FinishAvoidRealign();
             }
             break;
 
         case APP_AUTO_EXIT_STATE_AVOID_STOP_2:
-            if(AppAutoExitService_HasElapsed(g_stateStartTick,
+            if(AppAutoExitService_HasElapsed(g_autoExit.stateStartTick,
                                              APP_AUTO_EXIT_SHIFT_STOP_MS) == TRUE)
             {
                 AppAutoExitService_StartResumeExitProfile();
@@ -412,7 +431,7 @@ static void AppAutoExitService_ServiceState(void)
 
         case APP_AUTO_EXIT_STATE_BLOCKED:
         case APP_AUTO_EXIT_STATE_STOPPED:
-            if(AppAutoExitService_HasElapsed(g_stateStartTick,
+            if(AppAutoExitService_HasElapsed(g_autoExit.stateStartTick,
                                              APP_AUTO_EXIT_FINAL_STOP_MS) == TRUE)
             {
                 AppAutoExitService_EnterIdle();
@@ -442,7 +461,7 @@ static void AppAutoExitService_HandleCommand(AppAutoExitCmd command)
             break;
 
         case APP_AUTO_EXIT_CMD_STOP:
-            if(g_autoExitState != APP_AUTO_EXIT_STATE_IDLE)
+            if(g_autoExit.state != APP_AUTO_EXIT_STATE_IDLE)
             {
                 AppAutoExitService_EnterStopped();
             }
@@ -453,7 +472,7 @@ static void AppAutoExitService_HandleCommand(AppAutoExitCmd command)
             break;
 
         case APP_AUTO_EXIT_CMD_NORMAL:
-            if(g_autoExitState == APP_AUTO_EXIT_STATE_IDLE)
+            if(g_autoExit.state == APP_AUTO_EXIT_STATE_IDLE)
             {
                 AppAutoExitMonitor_SetIdle();
             }
@@ -470,13 +489,14 @@ void AppAutoExitService_Init(void)
 
     AppAutoExitService_EnterIdle();
 
-    g_autoExitCmd.driveCmd = APP_AUTO_EXIT_DRIVE_STOP;
-    g_autoExitCmd.steeringCmd = APP_AUTO_EXIT_STEER_CENTER;
+    g_autoExit.cmd.driveCmd = APP_AUTO_EXIT_DRIVE_STOP;
+    g_autoExit.cmd.steeringCmd = APP_AUTO_EXIT_STEER_CENTER;
+    g_autoExit.lastCommand = APP_AUTO_EXIT_CMD_NORMAL;
 }
 
 boolean AppAutoExitService_IsActive(void)
 {
-    return g_autoExitActive;
+    return g_autoExit.active;
 }
 
 BaseType_t AppAutoExitService_GetControlCommand(VehicleControlCmd_t *cmd)
@@ -486,12 +506,12 @@ BaseType_t AppAutoExitService_GetControlCommand(VehicleControlCmd_t *cmd)
         return pdFAIL;
     }
 
-    if((g_autoExitActive == FALSE) || (g_autoExitCmdValid == FALSE))
+    if((g_autoExit.active == FALSE) || (g_autoExit.cmdValid == FALSE))
     {
         return pdFAIL;
     }
 
-    *cmd = g_autoExitCmd;
+    *cmd = g_autoExit.cmd;
     return pdPASS;
 }
 
@@ -499,7 +519,6 @@ void AppAutoExitService_Task(void *arg)
 {
     TickType_t lastWakeTime;
     AppAutoParkingState autoParking;
-    static AppAutoExitCmd prevCmd = APP_AUTO_EXIT_CMD_NORMAL;
 
     (void)arg;
 
@@ -509,10 +528,10 @@ void AppAutoExitService_Task(void *arg)
     {
         if(AppRxService_GetAutoParkingState(&autoParking) == pdPASS)
         {
-            if(autoParking.cmd != prevCmd)
+            if(autoParking.cmd != g_autoExit.lastCommand)
             {
                 AppAutoExitService_HandleCommand(autoParking.cmd);
-                prevCmd = autoParking.cmd;
+                g_autoExit.lastCommand = autoParking.cmd;
             }
         }
 

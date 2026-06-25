@@ -4,35 +4,22 @@
 #include "App_RxService.h"
 #include "task.h"
 
-#define APP_AUTO_EXIT_BASE_TURN_DEG        (90)
-#define APP_AUTO_EXIT_YAW_TARGET_TOL_DEG   (15)
+typedef struct
+{
+    AppAutoExitStatus status;
+    TickType_t resultStartTick;
+    TickType_t lastStatusTxTick;
 
-/*
- * IMU yaw에서 오른쪽 회전 시 yaw가 증가하면 +1
- * 오른쪽 회전 시 yaw가 감소하면 -1
- * 실제 IMU 들어오면 테스트해서 결정.
- */
-#define APP_AUTO_EXIT_IMU_RIGHT_SIGN       (1)
+    sint16 startYawDeg;
+    sint16 endYawDeg;
+    sint16 lineAngleDeg;
+    sint16 targetTurnDeg;
+    sint16 targetYawDeg;
+    sint16 yawErrorDeg;
+    boolean yawValid;
+} AppAutoExitMonitorContext;
 
-static AppAutoExitStatus g_exitStatus = APP_AUTO_EXIT_STATUS_IDLE;
-static TickType_t g_exitResultStartTick = 0u;
-static TickType_t g_lastStatusTxTick = 0u;
-
-static sint16 g_exitStartYawDeg = 0;
-static sint16 g_exitEndYawDeg = 0;
-static sint16 g_exitYawDiffDeg = 0;
-static boolean g_exitYawValid = FALSE;
-
-static sint16 g_exitLineAngleDeg = 0;
-static sint16 g_exitTargetTurnDeg = 0;
-static sint16 g_exitTargetYawDeg = 0;
-static sint16 g_exitYawErrorDeg = 0;
-
-/* 디버거 확인용 */
-volatile sint16 g_dbg_autoExitLineAngleDeg = 0;
-volatile sint16 g_dbg_autoExitTargetTurnDeg = 0;
-volatile sint16 g_dbg_autoExitTargetYawDeg = 0;
-volatile sint16 g_dbg_autoExitYawErrorDeg = 0;
+static AppAutoExitMonitorContext g_monitor;
 
 static boolean AppAutoExitMonitor_HasElapsed(TickType_t startTick,
                                              uint32 durationMs)
@@ -47,7 +34,6 @@ static boolean AppAutoExitMonitor_HasElapsed(TickType_t startTick,
 static boolean AppAutoExitMonitor_IsResultStatus(AppAutoExitStatus status)
 {
     if((status == APP_AUTO_EXIT_STATUS_COMPLETE) ||
-       (status == APP_AUTO_EXIT_STATUS_BLOCKED) ||
        (status == APP_AUTO_EXIT_STATUS_STOPPED))
     {
         return TRUE;
@@ -71,16 +57,10 @@ static sint16 AppAutoExitMonitor_NormalizeYawDeg(sint16 yawDeg)
     return yawDeg;
 }
 
-static sint16 AppAutoExitMonitor_CalcYawDiffDeg(sint16 currentYawDeg,
-                                                sint16 startYawDeg)
-{
-    return AppAutoExitMonitor_NormalizeYawDeg(currentYawDeg - startYawDeg);
-}
-
 static sint16 AppAutoExitMonitor_CalcYawErrorToTargetDeg(sint16 targetYawDeg,
                                                          sint16 currentYawDeg)
 {
-    return AppAutoExitMonitor_NormalizeYawDeg(targetYawDeg - currentYawDeg);
+    return AppAutoExitMonitor_NormalizeYawDeg((sint16)(targetYawDeg - currentYawDeg));
 }
 
 #if (APP_AUTO_EXIT_YAW_VALIDATION_ENABLE != 0u)
@@ -102,28 +82,20 @@ static sint16 AppAutoExitMonitor_CalcTargetTurnDeg(AppAutoExitDirection directio
 
     if(direction == APP_AUTO_EXIT_DIR_RIGHT)
     {
-        /*
-         * lineAngleDeg > 0: 왼쪽으로 기울어짐
-         * 오른쪽 출차는 더 많이 돌아야 함.
-         */
-        targetTurnDeg = APP_AUTO_EXIT_BASE_TURN_DEG + lineAngleDeg;
+        targetTurnDeg = (sint16)(APP_AUTO_EXIT_BASE_TURN_DEG + lineAngleDeg);
     }
     else
     {
-        /*
-         * 왼쪽 출차는 반대.
-         * 왼쪽으로 이미 2도 기울어져 있으면 88도만 돌면 됨.
-         */
-        targetTurnDeg = APP_AUTO_EXIT_BASE_TURN_DEG - lineAngleDeg;
+        targetTurnDeg = (sint16)(APP_AUTO_EXIT_BASE_TURN_DEG - lineAngleDeg);
     }
 
-    if(targetTurnDeg < 45)
+    if(targetTurnDeg < APP_AUTO_EXIT_TARGET_TURN_MIN_DEG)
     {
-        targetTurnDeg = 45;
+        targetTurnDeg = APP_AUTO_EXIT_TARGET_TURN_MIN_DEG;
     }
-    else if(targetTurnDeg > 135)
+    else if(targetTurnDeg > APP_AUTO_EXIT_TARGET_TURN_MAX_DEG)
     {
-        targetTurnDeg = 135;
+        targetTurnDeg = APP_AUTO_EXIT_TARGET_TURN_MAX_DEG;
     }
 
     return targetTurnDeg;
@@ -148,69 +120,52 @@ static sint16 AppAutoExitMonitor_CalcTargetYawDeg(sint16 startYawDeg,
         turnSign = 0;
     }
 
-    return AppAutoExitMonitor_NormalizeYawDeg(startYawDeg +
-                                              (sint16)(turnSign * targetTurnDeg));
+    return AppAutoExitMonitor_NormalizeYawDeg(
+        (sint16)(startYawDeg + (sint16)(turnSign * targetTurnDeg)));
 }
 
 static void AppAutoExitMonitor_ResetYaw(void)
 {
-    g_exitStartYawDeg = 0;
-    g_exitEndYawDeg = 0;
-    g_exitYawDiffDeg = 0;
-    g_exitYawValid = FALSE;
+    g_monitor.startYawDeg = 0;
+    g_monitor.endYawDeg = 0;
+    g_monitor.lineAngleDeg = 0;
+    g_monitor.targetTurnDeg = 0;
+    g_monitor.targetYawDeg = 0;
+    g_monitor.yawErrorDeg = 0;
+    g_monitor.yawValid = FALSE;
 }
 
 static void AppAutoExitMonitor_CaptureEndYaw(void)
 {
     AppUltrasonicState ultrasonic;
 
-    if((g_exitYawValid == TRUE) &&
+    if((g_monitor.yawValid == TRUE) &&
        (AppRxService_GetUltrasonicState(&ultrasonic) == pdPASS))
     {
-        g_exitEndYawDeg = ultrasonic.imuYaw;
-
-        g_exitYawDiffDeg =
-            AppAutoExitMonitor_CalcYawDiffDeg(g_exitEndYawDeg,
-                                              g_exitStartYawDeg);
-
-        g_exitYawErrorDeg =
-            AppAutoExitMonitor_CalcYawErrorToTargetDeg(g_exitTargetYawDeg,
-                                                       g_exitEndYawDeg);
-
-        g_dbg_autoExitYawErrorDeg = g_exitYawErrorDeg;
+        g_monitor.endYawDeg = ultrasonic.imuYaw;
+        g_monitor.yawErrorDeg =
+            AppAutoExitMonitor_CalcYawErrorToTargetDeg(g_monitor.targetYawDeg,
+                                                       g_monitor.endYawDeg);
     }
     else
     {
-        g_exitYawValid = FALSE;
+        g_monitor.yawValid = FALSE;
     }
 }
 
-static void AppAutoExitMonitor_UpdateCurrentYaw(void)
-{
-    if(g_exitYawValid == FALSE)
-    {
-        return;
-    }
-
-    AppAutoExitMonitor_CaptureEndYaw();
-}
-
-static boolean AppAutoExitMonitor_IsYawCompletionValid(AppAutoExitDirection direction)
+static boolean AppAutoExitMonitor_IsYawCompletionValid(void)
 {
 #if (APP_AUTO_EXIT_YAW_VALIDATION_ENABLE == 0u)
-    (void)direction;
     return TRUE;
 #else
     sint16 absYawErrorDeg;
 
-    (void)direction;
-
-    if(g_exitYawValid == FALSE)
+    if(g_monitor.yawValid == FALSE)
     {
         return FALSE;
     }
 
-    absYawErrorDeg = AppAutoExitMonitor_AbsSint16(g_exitYawErrorDeg);
+    absYawErrorDeg = AppAutoExitMonitor_AbsSint16(g_monitor.yawErrorDeg);
 
     return (absYawErrorDeg <= APP_AUTO_EXIT_YAW_TARGET_TOL_DEG) ? TRUE : FALSE;
 #endif
@@ -218,15 +173,15 @@ static boolean AppAutoExitMonitor_IsYawCompletionValid(AppAutoExitDirection dire
 
 static void AppAutoExitMonitor_ClearExpiredResult(void)
 {
-    if(AppAutoExitMonitor_IsResultStatus(g_exitStatus) == FALSE)
+    if(AppAutoExitMonitor_IsResultStatus(g_monitor.status) == FALSE)
     {
         return;
     }
 
-    if(AppAutoExitMonitor_HasElapsed(g_exitResultStartTick,
+    if(AppAutoExitMonitor_HasElapsed(g_monitor.resultStartTick,
                                      APP_AUTO_EXIT_RESULT_HOLD_MS) == TRUE)
     {
-        g_exitStatus = APP_AUTO_EXIT_STATUS_IDLE;
+        g_monitor.status = APP_AUTO_EXIT_STATUS_IDLE;
     }
 }
 
@@ -245,18 +200,18 @@ static void AppAutoExitMonitor_ServiceStatusTx(void)
 
     nowTick = xTaskGetTickCount();
 
-    if((nowTick - g_lastStatusTxTick) >= pdMS_TO_TICKS(APP_AUTO_EXIT_STATUS_TX_PERIOD_MS))
+    if((nowTick - g_monitor.lastStatusTxTick) >= pdMS_TO_TICKS(APP_AUTO_EXIT_STATUS_TX_PERIOD_MS))
     {
-        AppAutoExitMonitor_SendStatus(g_exitStatus);
-        g_lastStatusTxTick = nowTick;
+        AppAutoExitMonitor_SendStatus(g_monitor.status);
+        g_monitor.lastStatusTxTick = nowTick;
     }
 }
 
 void AppAutoExitMonitor_Init(void)
 {
-    g_exitStatus = APP_AUTO_EXIT_STATUS_IDLE;
-    g_exitResultStartTick = 0u;
-    g_lastStatusTxTick = xTaskGetTickCount();
+    g_monitor.status = APP_AUTO_EXIT_STATUS_IDLE;
+    g_monitor.resultStartTick = 0u;
+    g_monitor.lastStatusTxTick = xTaskGetTickCount();
 
     AppAutoExitMonitor_ResetYaw();
 }
@@ -266,72 +221,61 @@ void AppAutoExitMonitor_Start(AppAutoExitDirection direction)
     AppUltrasonicState ultrasonic;
     AppRpiInputState rpiInput;
 
-    g_exitStatus = APP_AUTO_EXIT_STATUS_IN_PROGRESS;
-
+    g_monitor.status = APP_AUTO_EXIT_STATUS_IN_PROGRESS;
     AppAutoExitMonitor_ResetYaw();
-
-    g_exitLineAngleDeg = 0;
-    g_exitTargetTurnDeg = 0;
-    g_exitTargetYawDeg = 0;
-    g_exitYawErrorDeg = 0;
 
     if(AppRxService_GetRpiInput(&rpiInput) == pdPASS)
     {
-        g_exitLineAngleDeg = rpiInput.lineAngleDeg;
+        g_monitor.lineAngleDeg = rpiInput.lineAngleDeg;
     }
 
     if(AppRxService_GetUltrasonicState(&ultrasonic) == pdPASS)
     {
-        g_exitStartYawDeg = ultrasonic.imuYaw;
-        g_exitEndYawDeg = ultrasonic.imuYaw;
-        g_exitYawDiffDeg = 0;
-        g_exitYawValid = TRUE;
+        g_monitor.startYawDeg = ultrasonic.imuYaw;
+        g_monitor.endYawDeg = ultrasonic.imuYaw;
+        g_monitor.yawValid = TRUE;
     }
 
-    g_exitTargetTurnDeg =
-        AppAutoExitMonitor_CalcTargetTurnDeg(direction, g_exitLineAngleDeg);
+    g_monitor.targetTurnDeg =
+        AppAutoExitMonitor_CalcTargetTurnDeg(direction,
+                                             g_monitor.lineAngleDeg);
 
-    if(g_exitYawValid == TRUE)
+    if(g_monitor.yawValid == TRUE)
     {
-        g_exitTargetYawDeg =
-            AppAutoExitMonitor_CalcTargetYawDeg(g_exitStartYawDeg,
+        g_monitor.targetYawDeg =
+            AppAutoExitMonitor_CalcTargetYawDeg(g_monitor.startYawDeg,
                                                 direction,
-                                                g_exitTargetTurnDeg);
+                                                g_monitor.targetTurnDeg);
 
-        g_exitYawErrorDeg =
-            AppAutoExitMonitor_CalcYawErrorToTargetDeg(g_exitTargetYawDeg,
-                                                       g_exitEndYawDeg);
+        g_monitor.yawErrorDeg =
+            AppAutoExitMonitor_CalcYawErrorToTargetDeg(g_monitor.targetYawDeg,
+                                                       g_monitor.endYawDeg);
     }
-
-    g_dbg_autoExitLineAngleDeg = g_exitLineAngleDeg;
-    g_dbg_autoExitTargetTurnDeg = g_exitTargetTurnDeg;
-    g_dbg_autoExitTargetYawDeg = g_exitTargetYawDeg;
-    g_dbg_autoExitYawErrorDeg = g_exitYawErrorDeg;
 }
 
 void AppAutoExitMonitor_SetIdle(void)
 {
-    g_exitStatus = APP_AUTO_EXIT_STATUS_IDLE;
+    g_monitor.status = APP_AUTO_EXIT_STATUS_IDLE;
 }
 
 void AppAutoExitMonitor_SetResult(AppAutoExitStatus status)
 {
-    g_exitStatus = status;
-    g_exitResultStartTick = xTaskGetTickCount();
+    g_monitor.status = status;
+    g_monitor.resultStartTick = xTaskGetTickCount();
 }
 
-boolean AppAutoExitMonitor_FinishAndValidate(AppAutoExitDirection direction)
+boolean AppAutoExitMonitor_FinishAndValidate(void)
 {
     AppAutoExitMonitor_CaptureEndYaw();
 
-    return AppAutoExitMonitor_IsYawCompletionValid(direction);
+    return AppAutoExitMonitor_IsYawCompletionValid();
 }
 
 void AppAutoExitMonitor_Service(void)
 {
-    if(g_exitStatus == APP_AUTO_EXIT_STATUS_IN_PROGRESS)
+    if(g_monitor.status == APP_AUTO_EXIT_STATUS_IN_PROGRESS)
     {
-        AppAutoExitMonitor_UpdateCurrentYaw();
+        AppAutoExitMonitor_CaptureEndYaw();
     }
 
     AppAutoExitMonitor_ClearExpiredResult();

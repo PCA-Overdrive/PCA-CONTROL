@@ -24,7 +24,7 @@ void AppAutoExitMonitor_Init(void);
 void AppAutoExitMonitor_Start(AppAutoExitDirection direction);
 void AppAutoExitMonitor_SetIdle(void);
 void AppAutoExitMonitor_SetResult(AppAutoExitStatus status);
-boolean AppAutoExitMonitor_FinishAndValidate(AppAutoExitDirection direction);
+boolean AppAutoExitMonitor_FinishAndValidate(void);
 void AppAutoExitMonitor_Service(void);
 
 #endif /* APP_AUTO_EXIT_SERVICE_INTERNAL_H */
