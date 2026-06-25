@@ -439,15 +439,6 @@ static void AppAutoExitPlanner_SetAvoidPlan(AppAutoExitAvoidPlan *avoidPlan,
 }
 
 /*
- * 회피 중 반대편이 위험한지 판단
- *
- * 예:
- *  - 좌측으로 출차하려고 오른쪽으로 회피 중이면,
- *    오른쪽 측면과 오른쪽 전방 코너가 위험한지 확인
- *
- * 여기서는 정지 기준을 APP_PDW_LEVEL_DANGER로 본다.
- */
-/*
  * 회피 방향의 지정된 PDW level 이상 여부 확인
  *
  * AVOID_ESCAPE 중에는 DANGER까지 기다리면 늦다.
@@ -816,6 +807,73 @@ boolean AppAutoExitPlanner_ShouldFinishEscapeDuringAvoid(AppAutoExitDirection ex
                                                       APP_PDW_DIR_LEFT_BEHIND,
                                                       APP_PDW_DIR_FRONT_LEFT,
                                                       APP_PDW_LEVEL_NEAR);
+}
+
+/*
+ * AVOID_REALIGN 중 원래 출차 방향이 DANGER인지 확인
+ *
+ * AVOID_REALIGN은 escape 후 다시 원래 출차 방향으로 정렬하는 단계다.
+ *
+ * 이 상태에서는 NEAR를 조기 종료 조건으로 사용하지 않는다.
+ * NEAR는 정렬 과정에서 자연스럽게 발생할 수 있고,
+ * 여기서 realign을 끝내면 정렬이 부족한 상태로 profile을 재개할 수 있다.
+ *
+ * 단, 원래 출차 방향 측면 또는 앞코너가 DANGER이면
+ * 더 진행하면 충돌 위험이 있으므로 BLOCKED 처리 대상이다.
+ *
+ * 좌측 출차:
+ *  - realign 방향은 LEFT
+ *  - LEFT_FRONT / LEFT_BEHIND / FRONT_LEFT 확인
+ *
+ * 우측 출차:
+ *  - realign 방향은 RIGHT
+ *  - RIGHT_FRONT / RIGHT_BEHIND / FRONT_RIGHT 확인
+ */
+boolean AppAutoExitPlanner_IsRealignSideDangerDuringAvoid(AppAutoExitDirection exitDirection)
+{
+    AppPdwState pdw;
+
+    static const AppPdwDirection leftRealignDirections[] =
+    {
+        APP_PDW_DIR_LEFT_FRONT,
+        APP_PDW_DIR_LEFT_BEHIND,
+        APP_PDW_DIR_FRONT_LEFT
+    };
+
+    static const AppPdwDirection rightRealignDirections[] =
+    {
+        APP_PDW_DIR_RIGHT_FRONT,
+        APP_PDW_DIR_RIGHT_BEHIND,
+        APP_PDW_DIR_FRONT_RIGHT
+    };
+
+    if(AppPdwService_GetState(&pdw) != pdPASS)
+    {
+        return FALSE;
+    }
+
+    if(pdw.enabled == FALSE)
+    {
+        return FALSE;
+    }
+
+    if(exitDirection == APP_AUTO_EXIT_DIR_LEFT)
+    {
+        return AppAutoExitPlanner_IsAnyLevelAtLeast(&pdw,
+                                                    leftRealignDirections,
+                                                    APP_AUTO_EXIT_ARRAY_COUNT(leftRealignDirections),
+                                                    APP_PDW_LEVEL_DANGER);
+    }
+
+    if(exitDirection == APP_AUTO_EXIT_DIR_RIGHT)
+    {
+        return AppAutoExitPlanner_IsAnyLevelAtLeast(&pdw,
+                                                    rightRealignDirections,
+                                                    APP_AUTO_EXIT_ARRAY_COUNT(rightRealignDirections),
+                                                    APP_PDW_LEVEL_DANGER);
+    }
+
+    return FALSE;
 }
 
 /*

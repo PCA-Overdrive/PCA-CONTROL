@@ -719,10 +719,21 @@ static void AppAutoExitService_ServiceState(void)
 
         case APP_AUTO_EXIT_STATE_AVOID_REALIGN:
             /*
-             * 다시 원래 출차 방향으로 정렬하는 단계
+             * AVOID_REALIGN은 escape 후 다시 원래 출차 방향으로 정렬하는 단계다.
+             *
+             * 이 상태에서는 NEAR 이상이라고 조기 종료하지 않는다.
+             * NEAR는 정렬 과정에서 자연스럽게 발생할 수 있고,
+             * 여기서 realign을 끝내면 정렬이 부족한 상태로 profile을 재개할 수 있다.
+             *
+             * 단, 원래 출차 방향이 DANGER이면 더 진행하면 위험하므로
+             * BLOCKED로 전환한다.
              */
-            if(AppAutoExitService_HasElapsed(g_autoExit.avoid.realignStartTick,
-                                             g_autoExit.avoid.realignMs) == TRUE)
+            if(AppAutoExitPlanner_IsRealignSideDangerDuringAvoid(g_autoExit.direction) == TRUE)
+            {
+                AppAutoExitService_EnterBlocked();
+            }
+            else if(AppAutoExitService_HasElapsed(g_autoExit.avoid.realignStartTick,
+                                                  g_autoExit.avoid.realignMs) == TRUE)
             {
                 AppAutoExitService_FinishAvoidRealign();
             }

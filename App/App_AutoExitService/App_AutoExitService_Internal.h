@@ -17,6 +17,8 @@ uint8 AppAutoExitPlanner_GetRealignSteer(AppAutoExitDirection exitDirection);
 
 boolean AppAutoExitPlanner_ShouldFinishEscapeDuringAvoid(AppAutoExitDirection exitDirection);
 
+boolean AppAutoExitPlanner_IsRealignSideDangerDuringAvoid(AppAutoExitDirection exitDirection);
+
 uint32 AppAutoExitPlanner_CalcFirstStepReductionMs(uint32 escapeMs,
                                                    uint32 realignMs);
 
