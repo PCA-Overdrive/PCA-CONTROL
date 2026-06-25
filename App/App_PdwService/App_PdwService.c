@@ -60,6 +60,8 @@ void AppPdwService_Process(const AppRpiInputState *rpiInput,
                     ((rpiInput->pdwSwitchOn == TRUE) && (rpiInput->gear != APP_GEAR_P))
                     ||
                     ((autoParkingState != NULL && autoParkingState->cmd != APP_AUTO_EXIT_CMD_STOP && autoParkingState->cmd != APP_AUTO_EXIT_CMD_NORMAL))
+                    ||
+                    (ultrasonic->vehicleSpeed <=3)
                     ) ? TRUE : FALSE;
 
     for(i = 0u; i < APP_PDW_DIRECTION_COUNT; i++)
