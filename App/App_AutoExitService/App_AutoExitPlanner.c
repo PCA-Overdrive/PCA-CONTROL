@@ -1,13 +1,13 @@
 #include "App_AutoExitService_Internal.h"
 
-#include "App_PdwService.h"
+#include "App_RxService.h"
 
 typedef struct
 {
     uint16 frontMm;
     uint16 rearMm;
     uint16 minMm;
-    boolean hasEnoughSpace;
+    boolean isSafe;
     boolean isFrontCloser;
     boolean isRearCloser;
 } AppAutoExitSideInfo;
@@ -19,6 +19,24 @@ typedef struct
     uint16 exitFrontCornerMm;
 } AppAutoExitSideContext;
 
+static boolean AppAutoExitPlanner_IsAnyDistanceBelow(const AppUltrasonicState *ultrasonic,
+                                                     const AppPdwDirection *directions,
+                                                     uint32 directionCount,
+                                                     uint16 thresholdMm)
+{
+    uint32 index;
+
+    for(index = 0u; index < directionCount; index++)
+    {
+        if(ultrasonic->distanceMm[directions[index]] < thresholdMm)
+        {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
 static AppAutoExitSideInfo AppAutoExitPlanner_MakeSideInfo(uint16 frontMm,
                                                            uint16 rearMm)
 {
@@ -28,8 +46,8 @@ static AppAutoExitSideInfo AppAutoExitPlanner_MakeSideInfo(uint16 frontMm,
     info.frontMm = frontMm;
     info.rearMm = rearMm;
     info.minMm = (frontMm < rearMm) ? frontMm : rearMm;
-    info.hasEnoughSpace = ((frontMm > APP_AUTO_EXIT_SIDE_SAFE_MM) &&
-                           (rearMm > APP_AUTO_EXIT_SIDE_SAFE_MM)) ? TRUE : FALSE;
+    info.isSafe = ((frontMm > APP_AUTO_EXIT_SIDE_SAFE_MM) &&
+                   (rearMm > APP_AUTO_EXIT_SIDE_SAFE_MM)) ? TRUE : FALSE;
 
     diffMm = (sint32)frontMm - (sint32)rearMm;
 
@@ -84,34 +102,34 @@ static AppAutoExitAvoidLevel AppAutoExitPlanner_GetAvoidLevel(const AppAutoExitS
     return APP_AUTO_EXIT_AVOID_NONE;
 }
 
-static AppAutoExitSideContext AppAutoExitPlanner_MakeSideContext(const AppPdwState *pdw,
+static AppAutoExitSideContext AppAutoExitPlanner_MakeSideContext(const AppUltrasonicState *ultrasonic,
                                                                  AppAutoExitDirection exitDirection)
 {
     AppAutoExitSideContext context;
 
     if(exitDirection == APP_AUTO_EXIT_DIR_LEFT)
     {
-        context.exitSide =
-            AppAutoExitPlanner_MakeSideInfo(pdw->distanceMm[APP_PDW_DIR_LEFT_FRONT],
-                                            pdw->distanceMm[APP_PDW_DIR_LEFT_BEHIND]);
+        context.exitSide = AppAutoExitPlanner_MakeSideInfo(
+            ultrasonic->distanceMm[APP_PDW_DIR_LEFT_FRONT],
+            ultrasonic->distanceMm[APP_PDW_DIR_LEFT_BEHIND]);
 
-        context.oppositeSide =
-            AppAutoExitPlanner_MakeSideInfo(pdw->distanceMm[APP_PDW_DIR_RIGHT_FRONT],
-                                            pdw->distanceMm[APP_PDW_DIR_RIGHT_BEHIND]);
+        context.oppositeSide = AppAutoExitPlanner_MakeSideInfo(
+            ultrasonic->distanceMm[APP_PDW_DIR_RIGHT_FRONT],
+            ultrasonic->distanceMm[APP_PDW_DIR_RIGHT_BEHIND]);
 
-        context.exitFrontCornerMm = pdw->distanceMm[APP_PDW_DIR_FRONT_LEFT];
+        context.exitFrontCornerMm = ultrasonic->distanceMm[APP_PDW_DIR_FRONT_LEFT];
     }
     else
     {
-        context.exitSide =
-            AppAutoExitPlanner_MakeSideInfo(pdw->distanceMm[APP_PDW_DIR_RIGHT_FRONT],
-                                            pdw->distanceMm[APP_PDW_DIR_RIGHT_BEHIND]);
+        context.exitSide = AppAutoExitPlanner_MakeSideInfo(
+            ultrasonic->distanceMm[APP_PDW_DIR_RIGHT_FRONT],
+            ultrasonic->distanceMm[APP_PDW_DIR_RIGHT_BEHIND]);
 
-        context.oppositeSide =
-            AppAutoExitPlanner_MakeSideInfo(pdw->distanceMm[APP_PDW_DIR_LEFT_FRONT],
-                                            pdw->distanceMm[APP_PDW_DIR_LEFT_BEHIND]);
+        context.oppositeSide = AppAutoExitPlanner_MakeSideInfo(
+            ultrasonic->distanceMm[APP_PDW_DIR_LEFT_FRONT],
+            ultrasonic->distanceMm[APP_PDW_DIR_LEFT_BEHIND]);
 
-        context.exitFrontCornerMm = pdw->distanceMm[APP_PDW_DIR_FRONT_RIGHT];
+        context.exitFrontCornerMm = ultrasonic->distanceMm[APP_PDW_DIR_FRONT_RIGHT];
     }
 
     return context;
@@ -142,51 +160,24 @@ static void AppAutoExitPlanner_SetAvoidPlan(AppAutoExitAvoidPlan *avoidPlan,
     }
 }
 
-static boolean AppAutoExitPlanner_IsAvoidSideDanger(const AppPdwState *pdw,
+static boolean AppAutoExitPlanner_IsAvoidSideDanger(const AppUltrasonicState *ultrasonic,
                                                     AppPdwDirection sideFrontDirection,
                                                     AppPdwDirection sideRearDirection,
                                                     AppPdwDirection frontCornerDirection)
 {
-    if(pdw == 0)
+    if(ultrasonic->distanceMm[sideFrontDirection] < APP_AUTO_EXIT_SIDE_MIN_MM)
     {
         return TRUE;
     }
 
-    if(pdw->level[sideFrontDirection] == APP_PDW_LEVEL_DANGER)
+    if(ultrasonic->distanceMm[sideRearDirection] < APP_AUTO_EXIT_SIDE_MIN_MM)
     {
         return TRUE;
     }
 
-    if(pdw->level[sideRearDirection] == APP_PDW_LEVEL_DANGER)
+    if(ultrasonic->distanceMm[frontCornerDirection] < APP_AUTO_EXIT_FRONT_HARD_STOP_MM)
     {
         return TRUE;
-    }
-
-    if(pdw->level[frontCornerDirection] == APP_PDW_LEVEL_DANGER)
-    {
-        return TRUE;
-    }
-
-    return FALSE;
-}
-
-static boolean AppAutoExitPlanner_IsAnyLevelDanger(const AppPdwState *pdw,
-                                                   const AppPdwDirection *directions,
-                                                   uint32 directionCount)
-{
-    uint32 index;
-
-    if(pdw == 0)
-    {
-        return TRUE;
-    }
-
-    for(index = 0u; index < directionCount; index++)
-    {
-        if(pdw->level[directions[index]] == APP_PDW_LEVEL_DANGER)
-        {
-            return TRUE;
-        }
     }
 
     return FALSE;
@@ -194,15 +185,13 @@ static boolean AppAutoExitPlanner_IsAnyLevelDanger(const AppPdwState *pdw,
 
 boolean AppAutoExitPlanner_IsStepSafetyDanger(const AppAutoExitMotionStep *step)
 {
-    AppPdwState pdw;
-
+    AppUltrasonicState ultrasonic;
     static const AppPdwDirection frontDirections[] =
     {
         APP_PDW_DIR_FRONT,
         APP_PDW_DIR_FRONT_LEFT,
         APP_PDW_DIR_FRONT_RIGHT
     };
-
     static const AppPdwDirection rearDirections[] =
     {
         APP_PDW_DIR_BEHIND,
@@ -212,26 +201,28 @@ boolean AppAutoExitPlanner_IsStepSafetyDanger(const AppAutoExitMotionStep *step)
 
     if(step == 0)
     {
-        return TRUE;
+        return FALSE;
     }
 
-    if(AppPdwService_GetState(&pdw) != pdPASS)
+    if(AppRxService_GetUltrasonicState(&ultrasonic) != pdPASS)
     {
-        return TRUE;
+        return FALSE;
     }
 
     if(step->driveCmd < APP_AUTO_EXIT_DRIVE_STOP)
     {
-        return AppAutoExitPlanner_IsAnyLevelDanger(&pdw,
-                                                   frontDirections,
-                                                   APP_AUTO_EXIT_ARRAY_COUNT(frontDirections));
+        return AppAutoExitPlanner_IsAnyDistanceBelow(&ultrasonic,
+                                                     frontDirections,
+                                                     APP_AUTO_EXIT_ARRAY_COUNT(frontDirections),
+                                                     APP_AUTO_EXIT_FRONT_HARD_STOP_MM);
     }
 
     if(step->driveCmd > APP_AUTO_EXIT_DRIVE_STOP)
     {
-        return AppAutoExitPlanner_IsAnyLevelDanger(&pdw,
-                                                   rearDirections,
-                                                   APP_AUTO_EXIT_ARRAY_COUNT(rearDirections));
+        return AppAutoExitPlanner_IsAnyDistanceBelow(&ultrasonic,
+                                                     rearDirections,
+                                                     APP_AUTO_EXIT_ARRAY_COUNT(rearDirections),
+                                                     APP_AUTO_EXIT_REAR_HARD_STOP_MM);
     }
 
     return FALSE;
@@ -240,7 +231,7 @@ boolean AppAutoExitPlanner_IsStepSafetyDanger(const AppAutoExitMotionStep *step)
 AppAutoExitStrategy AppAutoExitPlanner_SelectStrategy(AppAutoExitDirection exitDirection,
                                                       AppAutoExitAvoidPlan *avoidPlan)
 {
-    AppPdwState pdw;
+    AppUltrasonicState ultrasonic;
     AppAutoExitSideContext sideContext;
     AppAutoExitAvoidLevel avoidLevel;
 
@@ -251,26 +242,20 @@ AppAutoExitStrategy AppAutoExitPlanner_SelectStrategy(AppAutoExitDirection exitD
         return APP_AUTO_EXIT_STRATEGY_NORMAL;
     }
 
-    if(AppPdwService_GetState(&pdw) != pdPASS)
+    if(AppRxService_GetUltrasonicState(&ultrasonic) != pdPASS)
+    {
+        return APP_AUTO_EXIT_STRATEGY_NORMAL;
+    }
+
+    sideContext = AppAutoExitPlanner_MakeSideContext(&ultrasonic,
+                                                     exitDirection);
+
+    if(ultrasonic.distanceMm[APP_PDW_DIR_FRONT] < APP_AUTO_EXIT_FRONT_BLOCKED_MM)
     {
         return APP_AUTO_EXIT_STRATEGY_BLOCKED;
     }
 
-    sideContext = AppAutoExitPlanner_MakeSideContext(&pdw, exitDirection);
-
-    if(pdw.level[APP_PDW_DIR_FRONT] == APP_PDW_LEVEL_DANGER)
-    {
-        return APP_AUTO_EXIT_STRATEGY_BLOCKED;
-    }
-
-    if((exitDirection == APP_AUTO_EXIT_DIR_LEFT) &&
-       (pdw.level[APP_PDW_DIR_FRONT_LEFT] == APP_PDW_LEVEL_DANGER))
-    {
-        return APP_AUTO_EXIT_STRATEGY_BLOCKED;
-    }
-
-    if((exitDirection == APP_AUTO_EXIT_DIR_RIGHT) &&
-       (pdw.level[APP_PDW_DIR_FRONT_RIGHT] == APP_PDW_LEVEL_DANGER))
+    if(sideContext.exitFrontCornerMm < APP_AUTO_EXIT_FRONT_BLOCKED_MM)
     {
         return APP_AUTO_EXIT_STRATEGY_BLOCKED;
     }
@@ -278,12 +263,12 @@ AppAutoExitStrategy AppAutoExitPlanner_SelectStrategy(AppAutoExitDirection exitD
     avoidLevel = AppAutoExitPlanner_GetAvoidLevel(&sideContext.exitSide);
 
     if((avoidLevel == APP_AUTO_EXIT_AVOID_NONE) &&
-       (sideContext.exitSide.hasEnoughSpace == TRUE))
+       (sideContext.exitSide.isSafe == TRUE))
     {
         return APP_AUTO_EXIT_STRATEGY_NORMAL;
     }
 
-    if(sideContext.oppositeSide.hasEnoughSpace == TRUE)
+    if(sideContext.oppositeSide.isSafe == TRUE)
     {
         if(avoidLevel == APP_AUTO_EXIT_AVOID_NONE)
         {
@@ -319,22 +304,22 @@ uint8 AppAutoExitPlanner_GetRealignSteer(AppAutoExitDirection exitDirection)
 
 boolean AppAutoExitPlanner_IsOppositeSideDangerDuringAvoid(AppAutoExitDirection exitDirection)
 {
-    AppPdwState pdw;
+    AppUltrasonicState ultrasonic;
 
-    if(AppPdwService_GetState(&pdw) != pdPASS)
+    if(AppRxService_GetUltrasonicState(&ultrasonic) != pdPASS)
     {
-        return TRUE;
+        return FALSE;
     }
 
     if(exitDirection == APP_AUTO_EXIT_DIR_LEFT)
     {
-        return AppAutoExitPlanner_IsAvoidSideDanger(&pdw,
+        return AppAutoExitPlanner_IsAvoidSideDanger(&ultrasonic,
                                                     APP_PDW_DIR_RIGHT_FRONT,
                                                     APP_PDW_DIR_RIGHT_BEHIND,
                                                     APP_PDW_DIR_FRONT_RIGHT);
     }
 
-    return AppAutoExitPlanner_IsAvoidSideDanger(&pdw,
+    return AppAutoExitPlanner_IsAvoidSideDanger(&ultrasonic,
                                                 APP_PDW_DIR_LEFT_FRONT,
                                                 APP_PDW_DIR_LEFT_BEHIND,
                                                 APP_PDW_DIR_FRONT_LEFT);
