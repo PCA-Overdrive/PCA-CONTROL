@@ -9,7 +9,7 @@
 #define APP_PDW_SAFE_THRESHOLD_MM          (1000u)
 #define APP_PDW_CAUTION_THRESHOLD_MM       (600u)
 #define APP_PDW_NEAR_THRESHOLD_MM          (300u)
-#define APP_PDW_DANGER_THRESHOLD_MM        (150u)
+#define APP_PDW_DANGER_THRESHOLD_MM        (100u)
 
 static AppPdwState g_pdwState;
 

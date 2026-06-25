@@ -27,16 +27,16 @@ void AppDriveService_Task(void *arg)
             {
                 tx = autoExitCmd;
             }
+            else if((pdw.enabled == TRUE) && (pdw.dangerDetected == TRUE))
+            {
+                tx.driveCmd = 127u;
+            }
             else
             {
                 tx.driveCmd = rpiInput.driveCmd;
                 tx.steeringCmd = rpiInput.steeringCmd;
             }
 
-            if((pdw.enabled == TRUE) && (pdw.dangerDetected == TRUE))
-            {
-                tx.driveCmd = 127u;
-            }
 
             (void)AppCan_SendVehicleControl(&tx);
         }
