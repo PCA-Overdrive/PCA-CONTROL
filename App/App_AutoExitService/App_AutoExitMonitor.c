@@ -79,22 +79,9 @@ static sint16 AppAutoExitMonitor_NormalizeYawDeg(sint16 yawDeg)
     return yawDeg;
 }
 
-/*
- * 출차 방향과 lineAngle을 이용해 목표 회전 각도를 계산
- *
- * 직진 출차:
- *  - 회전 목표 없음
- *
- * 우측 출차:
- *  - 기본 회전각 + lineAngle
- *
- * 좌측 출차:
- *  - 기본 회전각 - lineAngle
- *
- * 계산된 회전각은 최소/최대 제한값 안으로 clamp한다.
- */
-static sint16 AppAutoExitMonitor_CalcTargetTurnDeg(AppAutoExitDirection direction,
-                                                   sint16 lineAngleDeg)
+static sint16 AppAutoExitMonitor_CalcTargetTurnDeg(
+    AppAutoExitDirection direction,
+    sint16 lineAngleDeg)
 {
     sint16 targetTurnDeg;
 
@@ -103,13 +90,18 @@ static sint16 AppAutoExitMonitor_CalcTargetTurnDeg(AppAutoExitDirection directio
         return 0;
     }
 
+    /*
+     * lineAngleDeg 기준:
+     * + 값 = 차량이 오른쪽으로 기울어짐
+     * - 값 = 차량이 왼쪽으로 기울어짐
+     */
     if(direction == APP_AUTO_EXIT_DIR_RIGHT)
     {
-        targetTurnDeg = (sint16)(APP_AUTO_EXIT_BASE_TURN_DEG + lineAngleDeg);
+        targetTurnDeg = (sint16)(APP_AUTO_EXIT_BASE_TURN_DEG - lineAngleDeg);
     }
     else
     {
-        targetTurnDeg = (sint16)(APP_AUTO_EXIT_BASE_TURN_DEG - lineAngleDeg);
+        targetTurnDeg = (sint16)(APP_AUTO_EXIT_BASE_TURN_DEG + lineAngleDeg);
     }
 
     if(targetTurnDeg < APP_AUTO_EXIT_TARGET_TURN_MIN_DEG)
