@@ -7,9 +7,9 @@
 
 #define APP_PDW_NO_OBSTACLE_DISTANCE_MM    (0u)
 #define APP_PDW_SAFE_THRESHOLD_MM          (1000u)
-#define APP_PDW_CAUTION_THRESHOLD_MM       (600u)
-#define APP_PDW_NEAR_THRESHOLD_MM          (300u)
-#define APP_PDW_DANGER_THRESHOLD_MM        (100u)
+#define APP_PDW_CAUTION_THRESHOLD_MM       (300u)
+#define APP_PDW_NEAR_THRESHOLD_MM          (250u)
+#define APP_PDW_DANGER_THRESHOLD_MM        (200u)
 
 static AppPdwState g_pdwState;
 
@@ -57,7 +57,7 @@ void AppPdwService_Process(const AppRpiInputState *rpiInput,
 
     // PDW 활성화 여부 결정: RPi에서 PDW 스위치가 켜져 있고, 기어가 P가 아닌 경우 활성화
     nextState.enabled = (
-                    ((rpiInput->pdwSwitchOn == TRUE) && (rpiInput->gear != APP_GEAR_P) &&  (ultrasonic->vehicleSpeed <=3))
+                    ((rpiInput->pdwSwitchOn == TRUE) && (rpiInput->gear != APP_GEAR_P) &&  (ultrasonic->vehicleSpeed <=30))
                     ||
                     ((autoParkingState != NULL && autoParkingState->cmd != APP_AUTO_EXIT_CMD_STOP && autoParkingState->cmd != APP_AUTO_EXIT_CMD_NORMAL))
                     ) ? TRUE : FALSE;
