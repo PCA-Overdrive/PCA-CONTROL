@@ -702,15 +702,15 @@ AppAutoExitAvoidObstacleState AppAutoExitPlanner_GetAvoidObstacleState(
     {
         if(exitDirection == APP_AUTO_EXIT_DIR_LEFT)
         {
-            level0 = pdw.level[APP_PDW_DIR_LEFT_FRONT];
-            level1 = pdw.level[APP_PDW_DIR_LEFT_BEHIND];
+            level0 = pdw.level[APP_PDW_DIR_FRONT];
+            level1 = pdw.level[APP_PDW_DIR_LEFT_FRONT];
             level2 = pdw.level[APP_PDW_DIR_FRONT_LEFT];
         }
         else if(exitDirection == APP_AUTO_EXIT_DIR_RIGHT)
         {
-            level0 = pdw.level[APP_PDW_DIR_RIGHT_FRONT];
-            level1 = pdw.level[APP_PDW_DIR_RIGHT_BEHIND];
-            level2 = pdw.level[APP_PDW_DIR_FRONT_RIGHT];
+            level0 = pdw.level[APP_PDW_DIR_FRONT];
+            level1 = pdw.level[APP_PDW_DIR_FRONT_RIGHT];
+            level2 = pdw.level[APP_PDW_DIR_RIGHT_FRONT];
         }
         else
         {
