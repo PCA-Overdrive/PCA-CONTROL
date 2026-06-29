@@ -10,6 +10,8 @@ static QueueHandle_t g_ultrasonicMailbox;
 static QueueHandle_t g_vehicleStatusMailbox;
 static QueueHandle_t g_autoParkingMailbox;
 
+extern volatile TickType_t g_rpiLastRxTick;
+
 void AppCan_Init(void)
 {
     McmcanFd_Init();
@@ -37,6 +39,7 @@ void AppCan_RxTask(void *arg)
         if(McmcanFd_RecvVehicleStatus(&vehicleStatus) == TRUE)
         {
             (void)xQueueOverwrite(g_vehicleStatusMailbox, &vehicleStatus);
+            g_rpiLastRxTick = xTaskGetTickCount();
         }
 
         if(McmcanFd_RecvAutoParking(&autoParking) == TRUE)
