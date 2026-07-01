@@ -1,4 +1,4 @@
-# PCA-Control-ECU (Control ECU)
+# PCA-Control-ECU
 
 ## 1. 프로젝트 개요
 
